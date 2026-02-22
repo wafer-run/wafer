@@ -166,8 +166,14 @@ impl Block for WASMBlock {
 
     fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         // We need to create a fresh instance for each handle call
-        // because WASM instances are not thread-safe
-        let ctx_arc: Arc<dyn Context> = Arc::from(ContextWrapper(ctx));
+        // because WASM instances are not thread-safe.
+        // SAFETY: The WASM call is synchronous — ctx outlives the call and the
+        // Arc is dropped before this function returns.
+        let ctx_arc: Arc<dyn Context> = unsafe {
+            let ctx_static: *const (dyn Context + 'static) =
+                std::mem::transmute(ctx as *const dyn Context);
+            Arc::new(ContextWrapper(ctx_static))
+        };
 
         let (mut store, instance) = match self.create_instance(Some(ctx_arc)) {
             Ok(r) => r,
@@ -240,7 +246,12 @@ impl Block for WASMBlock {
         ctx: &dyn Context,
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
-        let ctx_arc: Arc<dyn Context> = Arc::from(ContextWrapper(ctx));
+        // SAFETY: Same as handle — synchronous call, ctx outlives it.
+        let ctx_arc: Arc<dyn Context> = unsafe {
+            let ctx_static: *const (dyn Context + 'static) =
+                std::mem::transmute(ctx as *const dyn Context);
+            Arc::new(ContextWrapper(ctx_static))
+        };
 
         let (mut store, instance) = self
             .create_instance(Some(ctx_arc))

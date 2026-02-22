@@ -13,7 +13,6 @@ mod base64_serde {
     where
         S: Serializer,
     {
-        use serde::ser::Error;
         let encoded = base64_encode(bytes);
         serializer.serialize_str(&encoded)
     }

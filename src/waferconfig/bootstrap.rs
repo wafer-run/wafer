@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::runtime::Wafer;
 use crate::services::Services;
 use super::blocks::BlockRegistry;

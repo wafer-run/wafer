@@ -2,7 +2,6 @@ use std::sync::Arc;
 use wasmtime::*;
 
 use crate::context::Context;
-use crate::types::*;
 use super::memory::*;
 
 /// HostState stores the wafer Context for host function calls.

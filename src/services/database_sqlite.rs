@@ -1,4 +1,4 @@
-use rusqlite::{params_from_iter, types::Value as SqlValue, Connection, Row};
+use rusqlite::{types::Value as SqlValue, Connection, Row};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -159,6 +159,83 @@ fn build_where_clause(filters: &[Filter]) -> (String, Vec<SqlValue>) {
     (format!(" WHERE {}", clauses.join(" AND ")), values)
 }
 
+/// Auto-create a table with columns matching the provided data keys.
+/// Uses TEXT type for all columns (SQLite is dynamically typed anyway).
+/// The `id` column is used as the primary key.
+fn ensure_table(db: &Connection, table: &str, data: &HashMap<String, serde_json::Value>) {
+    let mut col_defs = Vec::new();
+    for key in data.keys() {
+        if key == "id" {
+            col_defs.insert(0, "id TEXT PRIMARY KEY".to_string());
+        } else {
+            col_defs.push(format!("{} TEXT", key));
+        }
+    }
+    if !data.contains_key("id") {
+        col_defs.insert(0, "id TEXT PRIMARY KEY".to_string());
+    }
+    let sql = format!(
+        "CREATE TABLE IF NOT EXISTS {} ({})",
+        table,
+        col_defs.join(", ")
+    );
+    db.execute_batch(&sql).ok();
+
+    // Also ensure any missing columns are added (for when a table exists but new fields are inserted)
+    if let Ok(existing) = table_columns(db, table) {
+        for key in data.keys() {
+            if !existing.contains(&key.to_lowercase()) {
+                let alter = format!("ALTER TABLE {} ADD COLUMN {} TEXT", table, key);
+                db.execute_batch(&alter).ok();
+            }
+        }
+    }
+}
+
+/// Get list of column names for an existing table.
+fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, ()> {
+    let mut stmt = db
+        .prepare(&format!("PRAGMA table_info({})", table))
+        .map_err(|_| ())?;
+    let cols: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|_| ())?
+        .filter_map(|r| r.ok())
+        .map(|c| c.to_lowercase())
+        .collect();
+    Ok(cols)
+}
+
+/// Check if a table exists in the database.
+fn table_exists(db: &Connection, table: &str) -> bool {
+    db.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        [table],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
+}
+
+/// Ensure that columns referenced in filters and sorts exist on the table.
+/// Adds missing columns as TEXT (they'll default to NULL).
+fn ensure_columns_for_query(db: &Connection, table: &str, filters: &[Filter], sort: &[SortField]) {
+    if let Ok(existing) = table_columns(db, table) {
+        for f in filters {
+            if !existing.contains(&f.field.to_lowercase()) {
+                let alter = format!("ALTER TABLE {} ADD COLUMN {} TEXT", table, f.field);
+                db.execute_batch(&alter).ok();
+            }
+        }
+        for s in sort {
+            if !existing.contains(&s.field.to_lowercase()) {
+                let alter = format!("ALTER TABLE {} ADD COLUMN {} TEXT", table, s.field);
+                db.execute_batch(&alter).ok();
+            }
+        }
+    }
+}
+
 fn build_order_clause(sort: &[SortField]) -> String {
     if sort.is_empty() {
         return String::new();
@@ -191,8 +268,19 @@ impl DatabaseService for SQLiteDatabaseService {
 
     fn list(&self, collection: &str, opts: &ListOptions) -> Result<RecordList, DatabaseError> {
         let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        if !table_exists(&db, collection) {
+            return Ok(RecordList {
+                records: Vec::new(),
+                total_count: 0,
+                page: 1,
+                page_size: if opts.limit > 0 { opts.limit } else { 0 },
+            });
+        }
 
-        let (where_clause, mut params) = build_where_clause(&opts.filters);
+        // Ensure filter/sort columns exist (add them if missing)
+        ensure_columns_for_query(&db, collection, &opts.filters, &opts.sort);
+
+        let (where_clause, params) = build_where_clause(&opts.filters);
         let order_clause = build_order_clause(&opts.sort);
 
         // Count total
@@ -271,6 +359,9 @@ impl DatabaseService for SQLiteDatabaseService {
                 serde_json::Value::String(now),
             );
         }
+
+        // Auto-create table if it doesn't exist
+        ensure_table(&db, collection, &data);
 
         let columns: Vec<&String> = data.keys().collect();
         let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("?{}", i)).collect();
@@ -363,6 +454,10 @@ impl DatabaseService for SQLiteDatabaseService {
 
     fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError> {
         let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        if !table_exists(&db, collection) {
+            return Ok(0);
+        }
+        ensure_columns_for_query(&db, collection, filters, &[]);
         let (where_clause, params) = build_where_clause(filters);
         let sql = format!("SELECT COUNT(*) FROM {}{}", collection, where_clause);
         let query_params: Vec<&dyn rusqlite::types::ToSql> =

@@ -122,8 +122,8 @@ pub(crate) fn execute_first_match_children(
             if let Some(idx) = child.match_pattern.find(":/") {
                 let pattern_path = &child.match_pattern[idx + 1..];
                 if let Some(msg_idx) = msg.kind.find(":/") {
-                    let msg_path = &msg.kind[msg_idx + 1..];
-                    extract_path_vars(pattern_path, msg_path, msg);
+                    let msg_path = msg.kind[msg_idx + 1..].to_string();
+                    extract_path_vars(pattern_path, &msg_path, msg);
                 }
             }
         }

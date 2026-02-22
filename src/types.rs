@@ -135,8 +135,13 @@ impl Message {
 
     /// Header returns a request header value.
     pub fn header(&self, name: &str) -> &str {
+        // Try exact case first, then lowercase (axum normalizes header names to lowercase)
         let key = format!("http.header.{}", name);
-        self.meta.get(&key).map(|s| s.as_str()).unwrap_or("")
+        if let Some(v) = self.meta.get(&key) {
+            return v.as_str();
+        }
+        let key_lower = format!("http.header.{}", name.to_lowercase());
+        self.meta.get(&key_lower).map(|s| s.as_str()).unwrap_or("")
     }
 
     /// Action returns the semantic request action.
@@ -190,7 +195,11 @@ impl Message {
 
     /// Cookie returns a named cookie value from the Cookie header.
     pub fn cookie(&self, name: &str) -> &str {
-        let raw = self.get_meta("http.header.Cookie");
+        // Try both cases: axum normalizes to lowercase
+        let mut raw = self.get_meta("http.header.Cookie");
+        if raw.is_empty() {
+            raw = self.get_meta("http.header.cookie");
+        }
         if raw.is_empty() {
             return "";
         }

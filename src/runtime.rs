@@ -9,7 +9,7 @@ use crate::config::*;
 use crate::context::RuntimeContext;
 use crate::executor::{matches_pattern, extract_path_vars};
 use crate::observability::{ObservabilityBus, ObservabilityContext};
-use crate::registry::{BlockFactory, Registry, StructBlockFactory};
+use crate::registry::{Registry, StructBlockFactory};
 use crate::services::Services;
 use crate::types::*;
 
