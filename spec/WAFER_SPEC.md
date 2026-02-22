@@ -1,12 +1,12 @@
 ---
-title: WAFFLE Specification
+title: WAFER Specification
 sidebar_label: Core Specification
 sidebar_position: 1
 slug: /spec
 hide_title: true
 ---
 
-# WAFFLE Specification
+# WAFER Specification
 
 **W**ired **A**rchitecture **F**or **F**low-**L**inked **E**xecution
 
@@ -16,7 +16,7 @@ Version: 0.0.1-draft
 
 ## Overview
 
-WAFFLE is a language-agnostic specification for building block-based processing pipelines. Chains can be standalone applications or embedded as logic components within existing programs. Blocks are pure processors that don't know about each other; the runtime handles all wiring.
+WAFER is a language-agnostic specification for building block-based processing pipelines. Chains can be standalone applications or embedded as logic components within existing programs. Blocks are pure processors that don't know about each other; the runtime handles all wiring.
 
 This specification defines:
 - Block interface contract
@@ -26,7 +26,7 @@ This specification defines:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                           WAFFLE RUNTIME                                 │
+│                           WAFER RUNTIME                                 │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
 │   CHAINS (nested tree structure defines message flow)                    │
@@ -50,7 +50,7 @@ This specification defines:
 
 ## Usage Modes
 
-WAFFLE chains are flexible - use them however fits your architecture:
+WAFER chains are flexible - use them however fits your architecture:
 
 ### Embedded Library
 
@@ -61,7 +61,7 @@ Use chains as composable logic within existing applications:
 │                      YOUR APPLICATION                            │
 │                                                                  │
 │   ┌──────────┐    ┌─────────────────────┐    ┌──────────┐      │
-│   │  HTTP    │───→│   WAFFLE CHAIN      │───→│  Your    │      │
+│   │  HTTP    │───→│   WAFER CHAIN      │───→│  Your    │      │
 │   │  Handler │    │  (validation/auth)  │    │  Logic   │      │
 │   └──────────┘    └─────────────────────┘    └──────────┘      │
 │                                                                  │
@@ -82,7 +82,7 @@ Build entire applications from chains with connection blocks (implementation-spe
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                       WAFFLE RUNTIME                             │
+│                       WAFER RUNTIME                             │
 │                                                                  │
 │   http ──→ auth ──→ validate ──→ transform ──→ db               │
 │                                                                  │
@@ -94,7 +94,7 @@ Build entire applications from chains with connection blocks (implementation-spe
 
 ### Hybrid
 
-Mix both - use WAFFLE for specific subsystems within a larger application.
+Mix both - use WAFER for specific subsystems within a larger application.
 
 ---
 
@@ -383,7 +383,7 @@ Chains define message flow through a nested tree structure.
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `version` | WAFFLE spec version this config targets (e.g., `"0.0.1-draft"`) | required |
+| `version` | WAFER spec version this config targets (e.g., `"0.0.1-draft"`) | required |
 | `chains` | Array of chain definitions | required |
 
 ### Chain Fields
@@ -606,7 +606,7 @@ If `Lifecycle(Init)` returns an error, the chain MUST NOT start.
 
 ### Runtime Requirements
 
-A WAFFLE-compliant runtime MUST:
+A WAFER-compliant runtime MUST:
 
 1. Load and instantiate blocks according to their `instance_mode`
 2. Parse chain configurations
@@ -620,7 +620,7 @@ A WAFFLE-compliant runtime MUST:
 
 ### Block Requirements
 
-A WAFFLE-compliant block MUST:
+A WAFER-compliant block MUST:
 
 1. Implement `Info()` returning valid BlockInfo
 2. Implement `Handle(ctx, msg)` returning valid Result
@@ -639,7 +639,7 @@ This specification is intentionally minimal. Implementations typically add:
 - **Type validation** - Schema validation for message data
 - **Observability** - Tracing, metrics, logging integration
 
-See implementation-specific documentation (e.g., WAFFLE-Go) for these features.
+See implementation-specific documentation (e.g., WAFER-Go) for these features.
 
 ---
 

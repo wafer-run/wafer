@@ -1,60 +1,60 @@
 ---
-title: WAFFLE-Go
+title: WAFER-Go
 sidebar_label: Go Implementation
 sidebar_position: 2
 slug: /go
 hide_title: true
 ---
 
-# WAFFLE-Go
+# WAFER-Go
 
-Go implementation of the [WAFFLE specification](./WAFFLE_SPEC.md).
+Go implementation of the [WAFER specification](./WAFER_SPEC.md).
 
 ---
 
 ## Overview
 
-WAFFLE-Go is the runtime layer that sits between the WAFFLE spec and applications built on it:
+WAFER-Go is the runtime layer that sits between the WAFER spec and applications built on it:
 
 ```
 ┌─────────────────────────────────────────────┐
 │           APPLICATION LAYER                 │
-│  (e.g., Solobase — see WAFFLE_SOLOBASE.md)  │
+│  (e.g., Solobase — see WAFER_SOLOBASE.md)  │
 ├─────────────────────────────────────────────┤
-│              WAFFLE-GO                      │
+│              WAFER-GO                      │
 │    Runtime, SDK, WASM Loader, CLI           │
 ├─────────────────────────────────────────────┤
-│             WAFFLE SPEC                     │
+│             WAFER SPEC                     │
 │   Blocks, Chains, Interfaces, Registry      │
 └─────────────────────────────────────────────┘
 ```
 
-WAFFLE-Go provides:
+WAFER-Go provides:
 - Go SDK for writing blocks
 - Runtime for loading and executing chains
 - WASM block loader using wazero
 - CLI tools for development
 
-For a real-world example of an application built on WAFFLE-Go, see Solobase — a BaaS (Backend as a Service) where every feature is a block with optional standalone UI.
+For a real-world example of an application built on WAFER-Go, see Solobase — a BaaS (Backend as a Service) where every feature is a block with optional standalone UI.
 
 ---
 
 ## Installation
 
 ```bash
-go get github.com/suppers-ai/waffle-go
+go get github.com/suppers-ai/wafer-go
 ```
 
 CLI (optional):
 ```bash
-go install github.com/suppers-ai/waffle-go/cmd/waffle@latest
+go install github.com/suppers-ai/wafer-go/cmd/wafer@latest
 ```
 
 ---
 
 ## Embedding in Existing Applications
 
-WAFFLE doesn't require building a full application from scratch. You can embed chains as reusable logic pipelines within your existing codebase.
+WAFER doesn't require building a full application from scratch. You can embed chains as reusable logic pipelines within your existing codebase.
 
 ### Use Cases
 
@@ -72,7 +72,7 @@ package main
 import (
     "net/http"
 
-    "github.com/suppers-ai/waffle-go"
+    "github.com/suppers-ai/wafer-go"
 )
 
 func main() {
@@ -80,12 +80,12 @@ func main() {
     db := connectDatabase()
     cache := setupCache()
 
-    // Set up WAFFLE chain for specific logic
-    wfl := waffle.New()
+    // Set up WAFER chain for specific logic
+    wfl := wafer.New()
     wfl.RegisterBlock("validate-user", &UserValidationBlock{})
-    wfl.AddChain(waffle.Chain{
+    wfl.AddChain(wafer.Chain{
         ID:   "user-operations",
-        Root: &waffle.Node{Block: "validate-user"},
+        Root: &wafer.Node{Block: "validate-user"},
     })
     wfl.Resolve()
 
@@ -94,11 +94,11 @@ func main() {
         // Your existing code...
         body := readBody(r)
 
-        // Run input through WAFFLE chain by ID
-        msg := &waffle.Message{Kind: "user.create", Data: body}
+        // Run input through WAFER chain by ID
+        msg := &wafer.Message{Kind: "user.create", Data: body}
         result := wfl.Execute("user-operations", msg)
 
-        if result.Action == waffle.Error {
+        if result.Action == wafer.Error {
             http.Error(w, result.Error.Message, 400)
             return
         }
@@ -116,11 +116,11 @@ func main() {
 ### Chain as Middleware
 
 ```go
-// Use WAFFLE chain as middleware in any router
-func waffleMiddleware(wfl *waffle.Waffle, chainID string) func(http.Handler) http.Handler {
+// Use WAFER chain as middleware in any router
+func waferMiddleware(wfl *wafer.Wafer, chainID string) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            msg := &waffle.Message{
+            msg := &wafer.Message{
                 Kind: r.Method + ":" + r.URL.Path, // e.g., "POST:/api/users"
                 Data: readBody(r),
                 Meta: map[string]string{
@@ -132,13 +132,13 @@ func waffleMiddleware(wfl *waffle.Waffle, chainID string) func(http.Handler) htt
             result := wfl.Execute(chainID, msg)
 
             switch result.Action {
-            case waffle.Error:
+            case wafer.Error:
                 http.Error(w, result.Error.Message, 400)
-            case waffle.Respond:
+            case wafer.Respond:
                 w.Write(result.Response.Data)
-            case waffle.Continue:
+            case wafer.Continue:
                 // Pass modified data to next handler
-                r = r.WithContext(context.WithValue(r.Context(), "waffle_data", msg.Data))
+                r = r.WithContext(context.WithValue(r.Context(), "wafer_data", msg.Data))
                 next.ServeHTTP(w, r)
             }
         })
@@ -147,7 +147,7 @@ func waffleMiddleware(wfl *waffle.Waffle, chainID string) func(http.Handler) htt
 
 // Usage with chi router
 r := chi.NewRouter()
-r.With(waffleMiddleware(wfl, "auth-verify")).Post("/api/*", apiHandler)
+r.With(waferMiddleware(wfl, "auth-verify")).Post("/api/*", apiHandler)
 ```
 
 ### Programmatic Chain Building
@@ -155,7 +155,7 @@ r.With(waffleMiddleware(wfl, "auth-verify")).Post("/api/*", apiHandler)
 You don't need JSON config files - build chains in code:
 
 ```go
-w := waffle.New()
+w := wafer.New()
 
 // Register blocks
 w.RegisterBlock("validate", &ValidateBlock{})
@@ -163,17 +163,17 @@ w.RegisterBlock("transform", &TransformBlock{})
 w.RegisterBlock("enrich", &EnrichBlock{})
 
 // Build chain programmatically
-w.AddChain(waffle.Chain{
+w.AddChain(wafer.Chain{
     ID:      "process-order",
     Summary: "Validates, transforms, and enriches incoming orders",
-    Config:  waffle.ChainConfig{OnError: "stop"},
-    Root: &waffle.Node{
+    Config:  wafer.ChainConfig{OnError: "stop"},
+    Root: &wafer.Node{
         Block:  "validate",
         Config: json.RawMessage(`{"schema": "order"}`),
-        Next: []*waffle.Node{
+        Next: []*wafer.Node{
             {
                 Block: "transform",
-                Next: []*waffle.Node{
+                Next: []*wafer.Node{
                     {Block: "enrich"},
                 },
             },
@@ -192,12 +192,12 @@ result := w.Execute("process-order", msg)
 Define blocks inline without separate files:
 
 ```go
-w.RegisterBlockFunc("log", func(ctx waffle.Context, msg *waffle.Message) waffle.Result {
-    waffle.Log(ctx, "info", string(msg.Data))
+w.RegisterBlockFunc("log", func(ctx wafer.Context, msg *wafer.Message) wafer.Result {
+    wafer.Log(ctx, "info", string(msg.Data))
     return msg.Continue()
 })
 
-w.RegisterBlockFunc("add-timestamp", func(ctx waffle.Context, msg *waffle.Message) waffle.Result {
+w.RegisterBlockFunc("add-timestamp", func(ctx wafer.Context, msg *wafer.Message) wafer.Result {
     msg.SetMeta("timestamp", time.Now().Format(time.RFC3339))
     return msg.Continue()
 })
@@ -206,33 +206,33 @@ w.RegisterBlockFunc("add-timestamp", func(ctx waffle.Context, msg *waffle.Messag
 ### Minimal Chain (No Config File)
 
 ```go
-// Entire WAFFLE setup in a few lines
-w := waffle.New()
+// Entire WAFER setup in a few lines
+w := wafer.New()
 
 w.RegisterBlockFunc("validate", validateUser)
 w.RegisterBlockFunc("normalize", normalizeEmail)
 
-w.AddChain(waffle.Chain{
+w.AddChain(wafer.Chain{
     ID:      "user-input",
     Summary: "Validates and normalizes user input data",
-    Root:    &waffle.Node{Block: "validate", Next: []*waffle.Node{{Block: "normalize"}}},
+    Root:    &wafer.Node{Block: "validate", Next: []*wafer.Node{{Block: "normalize"}}},
 })
 
 w.Start()
 
 // Execute chain by ID anywhere in your app
-result := w.Execute("user-input", &waffle.Message{Kind: "user.create", Data: userData})
+result := w.Execute("user-input", &wafer.Message{Kind: "user.create", Data: userData})
 ```
 
 This approach lets you:
-- Add WAFFLE to specific parts of your app incrementally
+- Add WAFER to specific parts of your app incrementally
 - Keep your existing architecture and frameworks
 - Use chains only where block composition makes sense
-- Mix WAFFLE logic with regular code freely
+- Mix WAFER logic with regular code freely
 
 ### Real-World Example: Solobase
 
-Solobase embeds WAFFLE-Go to build a block-based BaaS platform. Each feature (auth, database admin, storage, IAM, etc.) is a block with its own backend logic and optional Preact UI page. Chains compose blocks for request processing:
+Solobase embeds WAFER-Go to build a block-based BaaS platform. Each feature (auth, database admin, storage, IAM, etc.) is a block with its own backend logic and optional Preact UI page. Chains compose blocks for request processing:
 
 ```
 HTTP Request → Router
@@ -248,7 +248,7 @@ See the Solobase documentation for full architecture details.
 ## Types
 
 ```go
-package waffle
+package wafer
 
 type Message struct {
     Kind string            // e.g., "user.create", "order.process"
@@ -295,7 +295,7 @@ func (m *Message) Drop() Result
 func (m *Message) Error(e Error) Result
 
 type BlockInfo struct {
-    Name         string         // e.g., "@waffle/sqlite"
+    Name         string         // e.g., "@wafer/sqlite"
     Version      string         // e.g., "2.1.0" (semver)
     Interface    string         // e.g., "database@v1" (required)
     Summary      string         // Brief description of this implementation
@@ -385,8 +385,8 @@ func ConfigGet(ctx Context, key string) (string, bool) {
 }
 
 // Usage - either style works:
-waffle.Log(ctx, "info", "processing user")
-ctx.Send(&waffle.Message{Kind: "log", Meta: map[string]string{"level": "info"}, Data: []byte("processing user")})
+wafer.Log(ctx, "info", "processing user")
+ctx.Send(&wafer.Message{Kind: "log", Meta: map[string]string{"level": "info"}, Data: []byte("processing user")})
 ```
 
 ### Interface Definition Types
@@ -481,16 +481,16 @@ Block instance lifecycle is configurable. The block declares its default mode an
 Blocks declare their default mode and which modes are safe to use:
 
 ```go
-func Info() waffle.BlockInfo {
-    return waffle.BlockInfo{
+func Info() wafer.BlockInfo {
+    return wafer.BlockInfo{
         Name:         "@app/db-pool",
         Version:      "1.0.0",
         Interface:    "database@v1",
         Summary:      "PostgreSQL connection pool",
-        InstanceMode: waffle.Singleton,  // Default: share one pool
-        AllowedModes: []waffle.InstanceMode{
-            waffle.Singleton,
-            waffle.PerChain,
+        InstanceMode: wafer.Singleton,  // Default: share one pool
+        AllowedModes: []wafer.InstanceMode{
+            wafer.Singleton,
+            wafer.PerChain,
         },
     }
 }
@@ -528,11 +528,11 @@ type CacheBlock struct {
     mu    sync.RWMutex       // Required for thread safety
 }
 
-func (b *CacheBlock) Info() waffle.BlockInfo {
-    return waffle.BlockInfo{
+func (b *CacheBlock) Info() wafer.BlockInfo {
+    return wafer.BlockInfo{
         Name:         "@app/cache",
-        InstanceMode: waffle.Singleton,
-        AllowedModes: []waffle.InstanceMode{waffle.Singleton, waffle.PerChain},
+        InstanceMode: wafer.Singleton,
+        AllowedModes: []wafer.InstanceMode{wafer.Singleton, wafer.PerChain},
         // ...
     }
 }
@@ -543,11 +543,11 @@ func (b *CacheBlock) Info() waffle.BlockInfo {
 ```go
 type TransformBlock struct{}
 
-func (b *TransformBlock) Info() waffle.BlockInfo {
-    return waffle.BlockInfo{
+func (b *TransformBlock) Info() wafer.BlockInfo {
+    return wafer.BlockInfo{
         Name:         "@app/transform",
-        InstanceMode: waffle.PerExecution,  // No shared state
-        AllowedModes: []waffle.InstanceMode{waffle.PerExecution},  // Only safe mode
+        InstanceMode: wafer.PerExecution,  // No shared state
+        AllowedModes: []wafer.InstanceMode{wafer.PerExecution},  // Only safe mode
         // ...
     }
 }
@@ -566,7 +566,7 @@ Blocks **must be thread-safe** because:
 // WRONG - Race condition
 var cache map[string][]byte
 
-func Handle(ctx waffle.Context, msg *waffle.Message) waffle.Result {
+func Handle(ctx wafer.Context, msg *wafer.Message) wafer.Result {
     cache[key] = value  // Data race!
     return msg.Continue()
 }
@@ -577,7 +577,7 @@ type CacheBlock struct {
     mu    sync.RWMutex
 }
 
-func (b *CacheBlock) Handle(ctx waffle.Context, msg *waffle.Message) waffle.Result {
+func (b *CacheBlock) Handle(ctx wafer.Context, msg *wafer.Message) wafer.Result {
     b.mu.Lock()
     b.cache[key] = value
     b.mu.Unlock()
@@ -595,7 +595,7 @@ The runtime guarantees:
 The runtime recovers panics in block execution and converts them to `Error` results:
 
 ```go
-func (w *Waffle) executeNode(node *Node, msg *Message, onError string) (result Result) {
+func (w *Wafer) executeNode(node *Node, msg *Message, onError string) (result Result) {
     defer func() {
         if r := recover(); r != nil {
             result = Result{
@@ -619,7 +619,7 @@ Blocks should still handle errors gracefully rather than panicking.
 The runtime provides hooks for monitoring and tracing:
 
 ```go
-type Waffle struct {
+type Wafer struct {
     // ... other fields
 
     // Observability hooks (optional)
@@ -640,10 +640,10 @@ type ObservabilityContext struct {
 
 Example usage:
 ```go
-w := waffle.New()
-w.OnBlockEnd = func(ctx waffle.ObservabilityContext, result waffle.Result, d time.Duration) {
+w := wafer.New()
+w.OnBlockEnd = func(ctx wafer.ObservabilityContext, result wafer.Result, d time.Duration) {
     metrics.RecordBlockLatency(ctx.BlockName, d)
-    if result.Action == waffle.Error {
+    if result.Action == wafer.Error {
         metrics.IncrementBlockErrors(ctx.BlockName)
     }
 }
@@ -659,10 +659,10 @@ w.OnBlockEnd = func(ctx waffle.ObservabilityContext, result waffle.Result, d tim
 // blocks/validate.go
 package main
 
-import "github.com/suppers-ai/waffle-go"
+import "github.com/suppers-ai/wafer-go"
 
-func Info() waffle.BlockInfo {
-    return waffle.BlockInfo{
+func Info() wafer.BlockInfo {
+    return wafer.BlockInfo{
         Name:      "@app/validate",
         Version:   "1.0.0",
         Interface: "validator@v1",
@@ -670,25 +670,25 @@ func Info() waffle.BlockInfo {
     }
 }
 
-func Handle(ctx waffle.Context, msg *waffle.Message) waffle.Result {
+func Handle(ctx wafer.Context, msg *wafer.Message) wafer.Result {
     var user User
     if err := msg.Unmarshal(&user); err != nil {
-        waffle.Log(ctx, "error", "failed to parse request")
-        return msg.Error(waffle.Error{
+        wafer.Log(ctx, "error", "failed to parse request")
+        return msg.Error(wafer.Error{
             Code: "invalid_json",
             Message:  "failed to parse request",
         })
     }
 
     if user.Email == "" {
-        return msg.Error(waffle.Error{
+        return msg.Error(wafer.Error{
             Code: "validation_error",
             Message:  "email is required",
             Meta: map[string]string{"field": "email"},
         })
     }
 
-    waffle.Log(ctx, "info", "validation passed")
+    wafer.Log(ctx, "info", "validation passed")
     return msg.Continue()
 }
 ```
@@ -702,7 +702,7 @@ package main
 import (
     "sync"
 
-    "github.com/suppers-ai/waffle-go"
+    "github.com/suppers-ai/wafer-go"
 )
 
 // CacheBlock is a thread-safe in-memory cache.
@@ -713,24 +713,24 @@ type CacheBlock struct {
     mu    sync.RWMutex
 }
 
-func (b *CacheBlock) Info() waffle.BlockInfo {
-    return waffle.BlockInfo{
+func (b *CacheBlock) Info() wafer.BlockInfo {
+    return wafer.BlockInfo{
         Name:         "@app/cache",
         Version:      "1.0.0",
         Interface:    "cache@v1",
         Summary:      "In-memory cache. Returns cached response if exists, otherwise continues.",
-        InstanceMode: waffle.Singleton,
-        AllowedModes: []waffle.InstanceMode{waffle.Singleton, waffle.PerChain},
+        InstanceMode: wafer.Singleton,
+        AllowedModes: []wafer.InstanceMode{wafer.Singleton, wafer.PerChain},
     }
 }
 
-func (b *CacheBlock) Lifecycle(ctx waffle.Context, event waffle.LifecycleEvent) error {
+func (b *CacheBlock) Lifecycle(ctx wafer.Context, event wafer.LifecycleEvent) error {
     switch event.Type {
-    case waffle.Init:
+    case wafer.Init:
         b.mu.Lock()
         b.cache = make(map[string][]byte)
         b.mu.Unlock()
-    case waffle.Stop:
+    case wafer.Stop:
         b.mu.Lock()
         b.cache = nil
         b.mu.Unlock()
@@ -738,7 +738,7 @@ func (b *CacheBlock) Lifecycle(ctx waffle.Context, event waffle.LifecycleEvent) 
     return nil
 }
 
-func (b *CacheBlock) Handle(ctx waffle.Context, msg *waffle.Message) waffle.Result {
+func (b *CacheBlock) Handle(ctx wafer.Context, msg *wafer.Message) wafer.Result {
     key := string(msg.Data) // or use a hash
 
     b.mu.RLock()
@@ -746,11 +746,11 @@ func (b *CacheBlock) Handle(ctx waffle.Context, msg *waffle.Message) waffle.Resu
     b.mu.RUnlock()
 
     if ok {
-        waffle.Log(ctx, "debug", "cache hit")
-        return msg.Respond(waffle.Response{Data: cached})
+        wafer.Log(ctx, "debug", "cache hit")
+        return msg.Respond(wafer.Response{Data: cached})
     }
 
-    waffle.Log(ctx, "debug", "cache miss")
+    wafer.Log(ctx, "debug", "cache miss")
     return msg.Continue()
 }
 ```
@@ -765,7 +765,7 @@ import (
     "encoding/json"
     "time"
 
-    "github.com/suppers-ai/waffle-go"
+    "github.com/suppers-ai/wafer-go"
 )
 
 // AuthBlock holds configuration set once during Init.
@@ -775,18 +775,18 @@ type AuthBlock struct {
     tokenExpiry time.Duration
 }
 
-func (b *AuthBlock) Info() waffle.BlockInfo {
-    return waffle.BlockInfo{
+func (b *AuthBlock) Info() wafer.BlockInfo {
+    return wafer.BlockInfo{
         Name:         "@app/auth",
         Version:      "1.0.0",
         Interface:    "auth@v1",
         Summary:      "JWT authentication. Handles login (issues tokens) and verify (validates tokens).",
-        InstanceMode: waffle.PerNode,
+        InstanceMode: wafer.PerNode,
     }
 }
 
-func (b *AuthBlock) Lifecycle(ctx waffle.Context, event waffle.LifecycleEvent) error {
-    if event.Type == waffle.Init {
+func (b *AuthBlock) Lifecycle(ctx wafer.Context, event wafer.LifecycleEvent) error {
+    if event.Type == wafer.Init {
         var cfg struct {
             JWTSecret   string `json:"jwt_secret"`
             TokenExpiry string `json:"token_expiry"`
@@ -799,10 +799,10 @@ func (b *AuthBlock) Lifecycle(ctx waffle.Context, event waffle.LifecycleEvent) e
     return nil
 }
 
-func (b *AuthBlock) Handle(ctx waffle.Context, msg *waffle.Message) waffle.Result {
+func (b *AuthBlock) Handle(ctx wafer.Context, msg *wafer.Message) wafer.Result {
     switch msg.GetMeta("operation") {
     case "login":
-        waffle.Log(ctx, "info", "login attempt")
+        wafer.Log(ctx, "info", "login attempt")
         return handleLogin(ctx, msg)
     case "verify":
         return handleVerify(ctx, msg)
@@ -822,8 +822,8 @@ import (
     "database/sql"
     "encoding/json"
 
-    "github.com/suppers-ai/waffle-go"
-    databasev1 "github.com/suppers-ai/waffle-go/interfaces/database/v1"
+    "github.com/suppers-ai/wafer-go"
+    databasev1 "github.com/suppers-ai/wafer-go/interfaces/database/v1"
     _ "github.com/mattn/go-sqlite3"
 )
 
@@ -833,19 +833,19 @@ type SQLiteBlock struct {
     db *sql.DB
 }
 
-func (b *SQLiteBlock) Info() waffle.BlockInfo {
-    return waffle.BlockInfo{
-        Name:         "@waffle/sqlite",
+func (b *SQLiteBlock) Info() wafer.BlockInfo {
+    return wafer.BlockInfo{
+        Name:         "@wafer/sqlite",
         Version:      "2.1.0",
         Interface:    "database@v1",
         Summary:      "SQLite database using local file storage. Supports query, insert, update, delete.",
-        InstanceMode: waffle.Singleton,  // Share connection pool
-        AllowedModes: []waffle.InstanceMode{waffle.Singleton, waffle.PerChain},
+        InstanceMode: wafer.Singleton,  // Share connection pool
+        AllowedModes: []wafer.InstanceMode{wafer.Singleton, wafer.PerChain},
     }
 }
 
-func (b *SQLiteBlock) Lifecycle(ctx waffle.Context, event waffle.LifecycleEvent) error {
-    if event.Type == waffle.Init {
+func (b *SQLiteBlock) Lifecycle(ctx wafer.Context, event wafer.LifecycleEvent) error {
+    if event.Type == wafer.Init {
         var cfg struct {
             Path string `json:"path"`
         }
@@ -855,29 +855,29 @@ func (b *SQLiteBlock) Lifecycle(ctx waffle.Context, event waffle.LifecycleEvent)
         b.db, err = sql.Open("sqlite3", cfg.Path)
         return err
     }
-    if event.Type == waffle.Stop && b.db != nil {
+    if event.Type == wafer.Stop && b.db != nil {
         return b.db.Close()
     }
     return nil
 }
 
-func (b *SQLiteBlock) Handle(ctx waffle.Context, msg *waffle.Message) waffle.Result {
+func (b *SQLiteBlock) Handle(ctx wafer.Context, msg *wafer.Message) wafer.Result {
     switch msg.GetMeta("operation") {
     case databasev1.MethodQuery:
         var req databasev1.QueryRequest
         msg.Unmarshal(&req)
-        waffle.Log(ctx, "debug", "executing query on "+req.Table)
+        wafer.Log(ctx, "debug", "executing query on "+req.Table)
         rows := executeQuery(req)
         resp, _ := json.Marshal(databasev1.QueryResponse{Rows: rows, Count: len(rows)})
-        return msg.Respond(waffle.Response{Data: resp})
+        return msg.Respond(wafer.Response{Data: resp})
 
     case databasev1.MethodInsert:
         var req databasev1.InsertRequest
         msg.Unmarshal(&req)
-        waffle.Log(ctx, "debug", "inserting into "+req.Table)
+        wafer.Log(ctx, "debug", "inserting into "+req.Table)
         id := executeInsert(req)
         resp, _ := json.Marshal(databasev1.InsertResponse{ID: id})
-        return msg.Respond(waffle.Response{Data: resp})
+        return msg.Respond(wafer.Response{Data: resp})
 
     default:
         return msg.Continue()
@@ -887,14 +887,14 @@ func (b *SQLiteBlock) Handle(ctx waffle.Context, msg *waffle.Message) waffle.Res
 
 ---
 
-## Waffle
+## Wafer
 
 ### Core Types
 
 ```go
-package waffle
+package wafer
 
-type Waffle struct {
+type Wafer struct {
     registry *Registry          // Block type registry (name -> factory)
     chains   map[string]*Chain  // Chain definitions by ID
     resolved map[string]Block   // blockType -> resolved instance (for Stop lifecycle)
@@ -926,7 +926,7 @@ type Node struct {
     Instance *InstanceMode    // Instance mode override (nil = use block default)
     Next     []*Node
 
-    // Resolved at startup by Waffle.Resolve()
+    // Resolved at startup by Wafer.Resolve()
     resolvedBlock Block              // Direct reference to block instance
     configMap     map[string]string  // Pre-parsed config for context
 }
@@ -937,7 +937,7 @@ type Node struct {
 After all blocks are registered and chains are added, `Resolve()` walks all chain trees and resolves block references to direct instances. This must be called before `Execute`.
 
 ```go
-func (w *Waffle) Resolve() error {
+func (w *Wafer) Resolve() error {
     for _, chain := range w.chains {
         if err := w.resolveNode(chain.Root); err != nil {
             return fmt.Errorf("chain %q: %w", chain.ID, err)
@@ -946,7 +946,7 @@ func (w *Waffle) Resolve() error {
     return nil
 }
 
-func (w *Waffle) resolveNode(node *Node) error {
+func (w *Wafer) resolveNode(node *Node) error {
     // Pre-parse config map for block-specific config
     if node.Config != nil {
         node.configMap = parseConfigMap(node.Config)
@@ -986,7 +986,7 @@ Resolution happens once at startup. After resolution, each node holds a direct `
 
 ```go
 // Execute runs a chain by ID
-func (w *Waffle) Execute(chainID string, msg *Message) Result {
+func (w *Wafer) Execute(chainID string, msg *Message) Result {
     chain, ok := w.chains[chainID]
     if !ok {
         return Result{
@@ -999,7 +999,7 @@ func (w *Waffle) Execute(chainID string, msg *Message) Result {
 }
 
 // executeNode runs a single node in the chain tree.
-func (w *Waffle) executeNode(node *Node, msg *Message, chainID, onError string, done <-chan struct{}, nodePath string) (result Result) {
+func (w *Wafer) executeNode(node *Node, msg *Message, chainID, onError string, done <-chan struct{}, nodePath string) (result Result) {
     // Panic recovery
     defer func() {
         if r := recover(); r != nil {
@@ -1051,7 +1051,7 @@ func (w *Waffle) executeNode(node *Node, msg *Message, chainID, onError string, 
 }
 
 // executeChainRef executes a chain reference node.
-func (w *Waffle) executeChainRef(node *Node, msg *Message, onError string, done <-chan struct{}) Result {
+func (w *Wafer) executeChainRef(node *Node, msg *Message, onError string, done <-chan struct{}) Result {
     chain, ok := w.chains[node.Chain]
     if !ok {
         return Result{
@@ -1071,7 +1071,7 @@ func (w *Waffle) executeChainRef(node *Node, msg *Message, onError string, done 
 }
 
 // executeFirstMatch runs the first child node whose Match pattern matches msg.Kind.
-func (w *Waffle) executeFirstMatch(nodes []*Node, msg *Message, chainID, onError string, done <-chan struct{}, parentPath string) Result {
+func (w *Wafer) executeFirstMatch(nodes []*Node, msg *Message, chainID, onError string, done <-chan struct{}, parentPath string) Result {
     for i, child := range nodes {
         if !matchesPattern(child.Match, msg.Kind) {
             continue
@@ -1112,7 +1112,7 @@ func matchesPattern(pattern, messageKind string) bool {
 ### Loading WASM Blocks (wazero)
 
 ```go
-package waffle
+package wafer
 
 import (
     "context"
@@ -1127,12 +1127,12 @@ type WASMBlock struct {
     module  api.Module
 }
 
-func (w *Waffle) loadWASMBlock(path string) (*WASMBlock, error) {
+func (w *Wafer) loadWASMBlock(path string) (*WASMBlock, error) {
     ctx := context.Background()
     rt := wazero.NewRuntime(ctx)
 
     // Register host module with functions matching WIT interface
-    hostModule := rt.NewHostModuleBuilder("waffle")
+    hostModule := rt.NewHostModuleBuilder("wafer")
 
     // host::send - generic capability dispatch
     hostModule.NewFunctionBuilder().
@@ -1208,14 +1208,14 @@ GOOS=wasip1 GOARCH=wasm go build -o block.wasm ./block.go
 
 ## WIT Interface (WebAssembly)
 
-WAFFLE-Go uses WIT (WebAssembly Interface Types) to define the contract between the runtime and WASM blocks.
+WAFER-Go uses WIT (WebAssembly Interface Types) to define the contract between the runtime and WASM blocks.
 
 ### Block Interface Definition
 
 ```wit
-// waffle-block.wit
+// wafer-block.wit
 
-package waffle:block@0.0.1-draft;
+package wafer:block@0.0.1-draft;
 
 interface types {
     record message {
@@ -1321,10 +1321,10 @@ world block {
 
 ```bash
 # Generate Go bindings from WIT
-wit-bindgen go --world block ./waffle-block.wit
+wit-bindgen go --world block ./wafer-block.wit
 
 # Generate Rust bindings
-wit-bindgen rust --world block ./waffle-block.wit
+wit-bindgen rust --world block ./wafer-block.wit
 ```
 
 ### WASM Block in Rust (using WIT)
@@ -1380,7 +1380,7 @@ impl Guest for MyBlock {
         // Access Context capabilities via host::send
         log("info", "handling message");
 
-        // Read config (equivalent to waffle.ConfigGet in Go)
+        // Read config (equivalent to wafer.ConfigGet in Go)
         if let Some(api_key) = config_get("api_key") {
             log("debug", &format!("using api key: {}...", &api_key[..4]));
         }
@@ -1420,13 +1420,13 @@ Interfaces are defined as JSON files using JSON Schema. This makes them:
 
 ```go
 // Load interface definition from JSON file
-func LoadInterface(path string) (*waffle.InterfaceDefinition, error) {
+func LoadInterface(path string) (*wafer.InterfaceDefinition, error) {
     data, err := os.ReadFile(path)
     if err != nil {
         return nil, err
     }
 
-    var def waffle.InterfaceDefinition
+    var def wafer.InterfaceDefinition
     if err := json.Unmarshal(data, &def); err != nil {
         return nil, err
     }
@@ -1478,29 +1478,29 @@ These are used internally by blocks but the source of truth for documentation is
 ### Commands
 
 ```bash
-# Run a WAFFLE application
-waffle run [config.json]
+# Run a WAFER application
+wafer run [config.json]
 
 # Create a new block
-waffle new block my-cache --interface cache@v1
+wafer new block my-cache --interface cache@v1
 
 # Create a new block with custom methods
-waffle new block my-processor --methods process,validate,transform
+wafer new block my-processor --methods process,validate,transform
 
 # Create a new interface
-waffle new interface payments --methods charge,refund,subscribe
+wafer new interface payments --methods charge,refund,subscribe
 
 # Create a new app from template
-waffle new app my-api --template api-with-auth
+wafer new app my-api --template api-with-auth
 
 # List available templates
-waffle templates list
+wafer templates list
 
 # Validate configuration
-waffle validate [config.json]
+wafer validate [config.json]
 
 # Show block info
-waffle info ./blocks/my-block.go
+wafer info ./blocks/my-block.go
 ```
 
 ### Generated Block Structure
@@ -1518,8 +1518,8 @@ my-cache/
 ## Directory Structure
 
 ```
-waffle-go/
-├── waffle.go           # Waffle runtime (New, Load, Start, Execute)
+wafer-go/
+├── wafer.go           # Wafer runtime (New, Load, Start, Execute)
 ├── types.go            # Message, Result, Action, Context, etc.
 ├── helpers.go          # Convenience wrappers (Log, ConfigGet)
 ├── config.go           # Config loading
@@ -1542,10 +1542,10 @@ waffle-go/
 │   └── logger/
 │
 ├── cmd/
-│   └── waffle/
+│   └── wafer/
 │       └── main.go     # CLI entry point
 │
-└── waffle.json         # Example configuration
+└── wafer.json         # Example configuration
 ```
 
 ---
@@ -1558,12 +1558,12 @@ package main
 import (
     "testing"
 
-    "github.com/suppers-ai/waffle-go"
+    "github.com/suppers-ai/wafer-go"
 )
 
-// Mock context for testing - implements waffle.Context
+// Mock context for testing - implements wafer.Context
 type mockContext struct {
-    messages []waffle.Message  // Captured Send() calls
+    messages []wafer.Message  // Captured Send() calls
     config   map[string]string
     done     chan struct{}
 }
@@ -1575,27 +1575,27 @@ func newMockContext() *mockContext {
     }
 }
 
-func (m *mockContext) Send(msg *waffle.Message) waffle.Result {
+func (m *mockContext) Send(msg *wafer.Message) wafer.Result {
     m.messages = append(m.messages, *msg)
 
     // Handle config.get requests
     if msg.Kind == "config.get" {
         key := msg.Meta["key"]
         if val, ok := m.config[key]; ok {
-            return waffle.Result{
-                Action:   waffle.Respond,
-                Response: &waffle.Response{Data: []byte(val)},
+            return wafer.Result{
+                Action:   wafer.Respond,
+                Response: &wafer.Response{Data: []byte(val)},
             }
         }
-        return waffle.Result{Action: waffle.Error, Error: &waffle.Error{Code: "not_found"}}
+        return wafer.Result{Action: wafer.Error, Error: &wafer.Error{Code: "not_found"}}
     }
 
     // Log and other capabilities just succeed
-    return waffle.Result{Action: waffle.Continue}
+    return wafer.Result{Action: wafer.Continue}
 }
 
-func (m *mockContext) Capabilities() []waffle.CapabilityInfo {
-    return []waffle.CapabilityInfo{
+func (m *mockContext) Capabilities() []wafer.CapabilityInfo {
+    return []wafer.CapabilityInfo{
         {Kind: "log", Summary: "Write log message"},
         {Kind: "config.get", Summary: "Get config value"},
     }
@@ -1609,17 +1609,17 @@ func TestValidateBlock(t *testing.T) {
     ctx := newMockContext()
 
     // Initialize block with context
-    Lifecycle(ctx, waffle.LifecycleEvent{Type: waffle.Init})
+    Lifecycle(ctx, wafer.LifecycleEvent{Type: wafer.Init})
 
     // Test valid input
-    msg := &waffle.Message{
+    msg := &wafer.Message{
         Kind: "user.create",
         Data: []byte(`{"email": "test@example.com", "password": "12345678"}`),
     }
 
     result := Handle(ctx, msg)
 
-    if result.Action != waffle.Continue {
+    if result.Action != wafer.Continue {
         t.Errorf("expected Continue, got %v", result.Action)
     }
 
@@ -1635,14 +1635,14 @@ func TestValidateBlock(t *testing.T) {
     }
 
     // Test invalid input
-    msg = &waffle.Message{
+    msg = &wafer.Message{
         Kind: "user.create",
         Data: []byte(`{"password": "12345678"}`),
     }
 
     result = Handle(ctx, msg)
 
-    if result.Action != waffle.Error {
+    if result.Action != wafer.Error {
         t.Errorf("expected Error, got %v", result.Action)
     }
     if result.Error.Code != "validation_error" {
@@ -1663,7 +1663,7 @@ Chains can also be defined as JSON configuration. Match patterns on `next` nodes
   "blocks": [
     {
       "type": "http",
-      "source": "github.com/suppers-ai/waffle-go/blocks/http"
+      "source": "github.com/suppers-ai/wafer-go/blocks/http"
     },
     {
       "type": "validate",
@@ -1671,11 +1671,11 @@ Chains can also be defined as JSON configuration. Match patterns on `next` nodes
     },
     {
       "type": "auth",
-      "source": "github.com/suppers-ai/waffle-go/blocks/auth-jwt@v2.0.0"
+      "source": "github.com/suppers-ai/wafer-go/blocks/auth-jwt@v2.0.0"
     },
     {
       "type": "db",
-      "source": "github.com/suppers-ai/waffle-go/blocks/sqlite"
+      "source": "github.com/suppers-ai/wafer-go/blocks/sqlite"
     },
     {
       "type": "log",
@@ -1734,8 +1734,8 @@ In this configuration:
 
 ## Related Documents
 
-- **[WAFFLE Spec](./WAFFLE_SPEC.md)** — The specification that WAFFLE-Go implements (blocks, chains, interfaces, registry)
-- **Solobase** — BaaS platform built on WAFFLE-Go (block-based architecture with Preact UIs)
+- **[WAFER Spec](./WAFER_SPEC.md)** — The specification that WAFER-Go implements (blocks, chains, interfaces, registry)
+- **Solobase** — BaaS platform built on WAFER-Go (block-based architecture with Preact UIs)
 
 ---
 
