@@ -1,3 +1,11 @@
+---
+title: WAFFLE Specification
+sidebar_label: Core Specification
+sidebar_position: 1
+slug: /spec
+hide_title: true
+---
+
 # WAFFLE Specification
 
 **W**ired **A**rchitecture **F**or **F**low-**L**inked **E**xecution

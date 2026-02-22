@@ -12,3 +12,8 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# Docusaurus
+site/node_modules/
+site/build/
+site/.docusaurus/

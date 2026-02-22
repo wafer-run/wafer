@@ -1,3 +1,11 @@
+---
+title: WAFFLE-Go
+sidebar_label: Go Implementation
+sidebar_position: 2
+slug: /go
+hide_title: true
+---
+
 # WAFFLE-Go
 
 Go implementation of the [WAFFLE specification](./WAFFLE_SPEC.md).
@@ -27,7 +35,7 @@ WAFFLE-Go provides:
 - WASM block loader using wazero
 - CLI tools for development
 
-For a real-world example of an application built on WAFFLE-Go, see [Solobase](./WAFFLE_SOLOBASE.md) — a BaaS (Backend as a Service) where every feature is a block with optional standalone UI.
+For a real-world example of an application built on WAFFLE-Go, see Solobase — a BaaS (Backend as a Service) where every feature is a block with optional standalone UI.
 
 ---
 
@@ -224,7 +232,7 @@ This approach lets you:
 
 ### Real-World Example: Solobase
 
-[Solobase](./WAFFLE_SOLOBASE.md) embeds WAFFLE-Go to build a block-based BaaS platform. Each feature (auth, database admin, storage, IAM, etc.) is a block with its own backend logic and optional Preact UI page. Chains compose blocks for request processing:
+Solobase embeds WAFFLE-Go to build a block-based BaaS platform. Each feature (auth, database admin, storage, IAM, etc.) is a block with its own backend logic and optional Preact UI page. Chains compose blocks for request processing:
 
 ```
 HTTP Request → Router
@@ -233,7 +241,7 @@ HTTP Request → Router
   └── POST /api/database/*    → admin-guard → database chain
 ```
 
-See `WAFFLE_SOLOBASE.md` for full architecture details.
+See the Solobase documentation for full architecture details.
 
 ---
 
@@ -1727,7 +1735,7 @@ In this configuration:
 ## Related Documents
 
 - **[WAFFLE Spec](./WAFFLE_SPEC.md)** — The specification that WAFFLE-Go implements (blocks, chains, interfaces, registry)
-- **[Solobase](./WAFFLE_SOLOBASE.md)** — BaaS platform built on WAFFLE-Go (block-based architecture with Preact UIs)
+- **Solobase** — BaaS platform built on WAFFLE-Go (block-based architecture with Preact UIs)
 
 ---
 
