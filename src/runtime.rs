@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -129,6 +129,7 @@ impl Wafer {
                     node_id: String::new(),
                     config: node.config_map.clone(),
                     cancelled: Arc::new(AtomicBool::new(false)),
+                    deadline: None,
                     named_services: self.named_services.clone(),
                     platform_services: self.platform_services.clone(),
                 };
@@ -173,6 +174,7 @@ impl Wafer {
             node_id: "shutdown".to_string(),
             config: HashMap::new(),
             cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: None,
             named_services: self.named_services.clone(),
             platform_services: self.platform_services.clone(),
         };
@@ -208,22 +210,22 @@ impl Wafer {
         self.hooks.fire_chain_start(chain_id, msg);
         let start = Instant::now();
 
-        // Set up chain-level timeout via cancellation flag
+        // Set up chain-level timeout via deadline
         let cancelled = Arc::new(AtomicBool::new(false));
         let timeout = chain.config.timeout;
+        let deadline = if !timeout.is_zero() {
+            Some(Instant::now() + timeout)
+        } else {
+            None
+        };
 
-        if !timeout.is_zero() {
-            let cancelled_clone = cancelled.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(timeout);
-                cancelled_clone.store(true, Ordering::Relaxed);
-            });
-        }
+        let mut visited_chains = HashSet::new();
+        visited_chains.insert(chain_id.to_string());
 
-        let result = self.execute_node(&chain.root, msg, chain_id, &chain.config.on_error, &cancelled, "root");
+        let result = self.execute_node(&chain.root, msg, chain_id, &chain.config.on_error, &cancelled, deadline, &mut visited_chains, "root");
 
         // Check timeout
-        let result = if !timeout.is_zero() && cancelled.load(Ordering::Relaxed) && result.action != Action::Error {
+        let result = if deadline.is_some() && cancelled.load(Ordering::Relaxed) && result.action != Action::Error {
             Result_ {
                 action: Action::Error,
                 error: Some(WaferError::new(
@@ -250,11 +252,13 @@ impl Wafer {
         chain_id: &str,
         on_error: &str,
         cancelled: &Arc<AtomicBool>,
+        deadline: Option<Instant>,
+        visited_chains: &mut HashSet<String>,
         node_path: &str,
     ) -> Result_ {
         // Handle chain references
         if !node.chain.is_empty() {
-            return self.execute_chain_ref(node, msg, on_error, cancelled);
+            return self.execute_chain_ref(node, msg, on_error, cancelled, deadline, visited_chains);
         }
 
         let block = match &node.resolved_block {
@@ -278,6 +282,7 @@ impl Wafer {
             node_id: node_path.to_string(),
             config: node.config_map.clone(),
             cancelled: cancelled.clone(),
+            deadline,
             named_services: self.named_services.clone(),
             platform_services: self.platform_services.clone(),
         };
@@ -345,7 +350,7 @@ impl Wafer {
             return result;
         }
 
-        self.execute_first_match(&node.next, msg, chain_id, on_error, cancelled, node_path)
+        self.execute_first_match(&node.next, msg, chain_id, on_error, cancelled, deadline, visited_chains, node_path)
     }
 
     fn execute_chain_ref(
@@ -354,7 +359,22 @@ impl Wafer {
         msg: &mut Message,
         on_error: &str,
         cancelled: &Arc<AtomicBool>,
+        deadline: Option<Instant>,
+        visited_chains: &mut HashSet<String>,
     ) -> Result_ {
+        // Circular chain reference detection
+        if visited_chains.contains(&node.chain) {
+            return Result_ {
+                action: Action::Error,
+                error: Some(WaferError::new(
+                    "circular_chain",
+                    format!("circular chain reference detected: {}", node.chain),
+                )),
+                response: None,
+                message: None,
+            };
+        }
+
         let chain = match self.chains.get(&node.chain) {
             Some(c) => c,
             None => {
@@ -370,7 +390,9 @@ impl Wafer {
             }
         };
 
-        let result = self.execute_node(&chain.root, msg, &chain.id, &chain.config.on_error, cancelled, "root");
+        visited_chains.insert(node.chain.clone());
+        let result = self.execute_node(&chain.root, msg, &chain.id, &chain.config.on_error, cancelled, deadline, visited_chains, "root");
+        visited_chains.remove(&node.chain);
 
         if result.action == Action::Continue && !node.next.is_empty() {
             return self.execute_first_match(
@@ -379,6 +401,8 @@ impl Wafer {
                 &chain.id,
                 on_error,
                 cancelled,
+                deadline,
+                visited_chains,
                 &format!("ref:{}", node.chain),
             );
         }
@@ -393,6 +417,8 @@ impl Wafer {
         chain_id: &str,
         on_error: &str,
         cancelled: &Arc<AtomicBool>,
+        deadline: Option<Instant>,
+        visited_chains: &mut HashSet<String>,
         parent_path: &str,
     ) -> Result_ {
         for (i, child) in nodes.iter().enumerate() {
@@ -410,7 +436,7 @@ impl Wafer {
                 }
             }
             let child_path = format!("{}.{}", parent_path, i);
-            return self.execute_node(child, msg, chain_id, on_error, cancelled, &child_path);
+            return self.execute_node(child, msg, chain_id, on_error, cancelled, deadline, visited_chains, &child_path);
         }
         Result_::continue_with(msg.clone())
     }

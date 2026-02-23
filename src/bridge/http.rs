@@ -272,7 +272,8 @@ pub fn wafer_handler(
         let cid = cid.clone();
         async move {
             let (parts, body) = req.into_parts();
-            let body_bytes = axum::body::to_bytes(body, usize::MAX)
+            const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+            let body_bytes = axum::body::to_bytes(body, MAX_BODY_SIZE)
                 .await
                 .unwrap_or_default()
                 .to_vec();

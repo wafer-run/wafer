@@ -46,6 +46,7 @@ pub struct RuntimeContext {
     pub node_id: String,
     pub config: HashMap<String, String>,
     pub cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub deadline: Option<std::time::Instant>,
     pub named_services:
         std::sync::Arc<HashMap<String, Box<dyn Any + Send + Sync>>>,
     pub platform_services: Option<std::sync::Arc<Services>>,
@@ -256,8 +257,16 @@ impl Context for RuntimeContext {
     }
 
     fn is_cancelled(&self) -> bool {
-        self.cancelled
-            .load(std::sync::atomic::Ordering::Relaxed)
+        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
+        if let Some(deadline) = self.deadline {
+            if std::time::Instant::now() >= deadline {
+                self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                return true;
+            }
+        }
+        false
     }
 
     fn service(&self, name: &str) -> Option<&dyn Any> {

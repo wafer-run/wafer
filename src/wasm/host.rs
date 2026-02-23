@@ -35,6 +35,11 @@ pub fn register_host_module(linker: &mut Linker<HostState>) -> Result<(), String
                     _ => return write_error_result_inline(&mut caller, "memory_error", "memory not found"),
                 };
 
+                const MAX_WASM_MSG_SIZE: usize = 16 * 1024 * 1024; // 16 MB
+                if msg_len < 0 || msg_len as usize > MAX_WASM_MSG_SIZE {
+                    return write_error_result_inline(&mut caller, "msg_too_large",
+                        &format!("message size {} exceeds maximum {}", msg_len, MAX_WASM_MSG_SIZE));
+                }
                 let mut buf = vec![0u8; msg_len as usize];
                 if let Err(_) = memory.read(&caller, msg_ptr as usize, &mut buf) {
                     return write_error_result_inline(&mut caller, "memory_error", "read failed");
