@@ -1142,3 +1142,388 @@ impl Context for TestContext {
 fn make_test_context() -> TestContext {
     TestContext
 }
+
+// ===========================================================================
+// 22. parse_versioned_block tests
+// ===========================================================================
+
+#[cfg(feature = "wasm")]
+mod versioned_block_tests {
+    use wafer_run::parse_versioned_block;
+
+    #[test]
+    fn test_parse_versioned_block_valid() {
+        let r = parse_versioned_block("github.com/acme/auth-block@v1.0.0").unwrap();
+        assert_eq!(r.owner, "acme");
+        assert_eq!(r.repo, "auth-block");
+        assert_eq!(r.version, "v1.0.0");
+    }
+
+    #[test]
+    fn test_parse_versioned_block_no_version() {
+        assert!(parse_versioned_block("github.com/acme/auth-block").is_none());
+    }
+
+    #[test]
+    fn test_parse_versioned_block_empty_version() {
+        assert!(parse_versioned_block("github.com/acme/auth-block@").is_none());
+    }
+
+    #[test]
+    fn test_parse_versioned_block_not_github() {
+        assert!(parse_versioned_block("gitlab.com/acme/auth-block@v1.0.0").is_none());
+    }
+
+    #[test]
+    fn test_parse_versioned_block_local_name() {
+        assert!(parse_versioned_block("@wafer/auth").is_none());
+    }
+
+    #[test]
+    fn test_parse_versioned_block_wrong_segments() {
+        // Only 2 segments (missing repo)
+        assert!(parse_versioned_block("github.com/acme@v1.0.0").is_none());
+        // 4 segments (too many)
+        assert!(parse_versioned_block("github.com/acme/auth/extra@v1.0.0").is_none());
+    }
+
+    #[test]
+    fn test_parse_versioned_block_latest_rejected() {
+        assert!(parse_versioned_block("github.com/acme/auth-block@latest").is_none());
+    }
+
+    #[test]
+    fn test_parse_versioned_block_prerelease() {
+        let r = parse_versioned_block("github.com/acme/auth-block@v2.0.0-rc.1").unwrap();
+        assert_eq!(r.owner, "acme");
+        assert_eq!(r.repo, "auth-block");
+        assert_eq!(r.version, "v2.0.0-rc.1");
+    }
+}
+
+// ===========================================================================
+// 22b. parse_unversioned_block tests
+// ===========================================================================
+
+#[cfg(feature = "wasm")]
+mod unversioned_block_tests {
+    use wafer_run::parse_unversioned_block;
+
+    #[test]
+    fn test_parse_unversioned_block_valid() {
+        let r = parse_unversioned_block("github.com/acme/auth-block").unwrap();
+        assert_eq!(r.owner, "acme");
+        assert_eq!(r.repo, "auth-block");
+    }
+
+    #[test]
+    fn test_parse_unversioned_block_with_at_rejected() {
+        assert!(parse_unversioned_block("github.com/acme/auth-block@v1.0.0").is_none());
+    }
+
+    #[test]
+    fn test_parse_unversioned_block_not_github() {
+        assert!(parse_unversioned_block("gitlab.com/acme/auth-block").is_none());
+    }
+
+    #[test]
+    fn test_parse_unversioned_block_wrong_segments() {
+        // Only 2 segments (missing repo)
+        assert!(parse_unversioned_block("github.com/acme").is_none());
+        // 4 segments (too many)
+        assert!(parse_unversioned_block("github.com/acme/auth/extra").is_none());
+        // 1 segment
+        assert!(parse_unversioned_block("github.com").is_none());
+    }
+
+    #[test]
+    fn test_parse_unversioned_block_at_latest() {
+        let r = parse_unversioned_block("github.com/acme/auth-block@latest").unwrap();
+        assert_eq!(r.owner, "acme");
+        assert_eq!(r.repo, "auth-block");
+    }
+
+    #[test]
+    fn test_parse_unversioned_block_empty_segments() {
+        assert!(parse_unversioned_block("github.com//auth-block").is_none());
+        assert!(parse_unversioned_block("github.com/acme/").is_none());
+    }
+
+    #[test]
+    fn test_parse_unversioned_block_local_name() {
+        assert!(parse_unversioned_block("my-block").is_none());
+        assert!(parse_unversioned_block("@wafer/auth").is_none());
+    }
+}
+
+// ===========================================================================
+// 23. Remote block resolve error paths
+// ===========================================================================
+
+#[cfg(feature = "wasm")]
+#[test]
+fn test_resolve_versioned_block_without_network() {
+    use wafer_run::*;
+
+    let mut w = Wafer::new();
+    // No platform services registered — network unavailable
+
+    let mut root = Node::new();
+    root.block = "github.com/acme/auth-block@v1.0.0".to_string();
+
+    let chain = Chain {
+        id: "remote-test".to_string(),
+        summary: "test".to_string(),
+        config: ChainConfig::default(),
+        http: None,
+        root: Box::new(root),
+    };
+    w.add_chain(chain);
+
+    let err = w.resolve().unwrap_err();
+    assert!(
+        err.contains("platform services not configured"),
+        "Expected platform services error, got: {}",
+        err
+    );
+}
+
+#[cfg(feature = "wasm")]
+#[test]
+fn test_resolve_versioned_block_invalid_wasm() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use wafer_run::*;
+    use wafer_run::services::{Services, network};
+
+    struct MockNetwork;
+    impl network::NetworkService for MockNetwork {
+        fn do_request(&self, _req: &network::Request) -> Result<network::Response, network::NetworkError> {
+            Ok(network::Response {
+                status_code: 200,
+                headers: HashMap::new(),
+                body: b"this is not valid wasm".to_vec(),
+            })
+        }
+    }
+
+    let mut w = Wafer::new();
+    w.register_platform_services(Services {
+        network: Some(Arc::new(MockNetwork)),
+        ..Services::default()
+    });
+
+    let mut root = Node::new();
+    root.block = "github.com/acme/bad-block@v1.0.0".to_string();
+
+    let chain = Chain {
+        id: "bad-wasm-test".to_string(),
+        summary: "test".to_string(),
+        config: ChainConfig::default(),
+        http: None,
+        root: Box::new(root),
+    };
+    w.add_chain(chain);
+
+    let err = w.resolve().unwrap_err();
+    assert!(
+        err.contains("failed to load remote block"),
+        "Expected WASM load error, got: {}",
+        err
+    );
+}
+
+// ===========================================================================
+// 24. Unversioned remote block resolve error paths
+// ===========================================================================
+
+#[cfg(feature = "wasm")]
+#[test]
+fn test_resolve_unversioned_block_without_network() {
+    use wafer_run::*;
+
+    let mut w = Wafer::new();
+    // No platform services registered — network unavailable
+
+    let mut root = Node::new();
+    root.block = "github.com/acme/auth-block".to_string();
+
+    let chain = Chain {
+        id: "unversioned-test".to_string(),
+        summary: "test".to_string(),
+        config: ChainConfig::default(),
+        http: None,
+        root: Box::new(root),
+    };
+    w.add_chain(chain);
+
+    let err = w.resolve().unwrap_err();
+    assert!(
+        err.contains("platform services not configured"),
+        "Expected platform services error, got: {}",
+        err
+    );
+}
+
+#[cfg(feature = "wasm")]
+#[test]
+fn test_resolve_unversioned_block_api_error() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use wafer_run::*;
+    use wafer_run::services::{Services, network};
+
+    struct MockNetwork;
+    impl network::NetworkService for MockNetwork {
+        fn do_request(&self, req: &network::Request) -> Result<network::Response, network::NetworkError> {
+            if req.url.contains("api.github.com") {
+                Ok(network::Response {
+                    status_code: 404,
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                })
+            } else {
+                Ok(network::Response {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                })
+            }
+        }
+    }
+
+    let mut w = Wafer::new();
+    w.register_platform_services(Services {
+        network: Some(Arc::new(MockNetwork)),
+        ..Services::default()
+    });
+
+    let mut root = Node::new();
+    root.block = "github.com/acme/auth-block".to_string();
+
+    let chain = Chain {
+        id: "api-error-test".to_string(),
+        summary: "test".to_string(),
+        config: ChainConfig::default(),
+        http: None,
+        root: Box::new(root),
+    };
+    w.add_chain(chain);
+
+    let err = w.resolve().unwrap_err();
+    assert!(
+        err.contains("HTTP 404"),
+        "Expected HTTP 404 error, got: {}",
+        err
+    );
+}
+
+#[cfg(feature = "wasm")]
+#[test]
+fn test_resolve_unversioned_block_no_wasm_asset() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use wafer_run::*;
+    use wafer_run::services::{Services, network};
+
+    struct MockNetwork;
+    impl network::NetworkService for MockNetwork {
+        fn do_request(&self, req: &network::Request) -> Result<network::Response, network::NetworkError> {
+            if req.url.contains("api.github.com") {
+                // Return releases with no .wasm assets
+                let json = r#"[{"assets":[{"name":"readme.txt","browser_download_url":"https://example.com/readme.txt"}]}]"#;
+                Ok(network::Response {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: json.as_bytes().to_vec(),
+                })
+            } else {
+                Ok(network::Response {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                })
+            }
+        }
+    }
+
+    let mut w = Wafer::new();
+    w.register_platform_services(Services {
+        network: Some(Arc::new(MockNetwork)),
+        ..Services::default()
+    });
+
+    let mut root = Node::new();
+    root.block = "github.com/acme/auth-block".to_string();
+
+    let chain = Chain {
+        id: "no-wasm-test".to_string(),
+        summary: "test".to_string(),
+        config: ChainConfig::default(),
+        http: None,
+        root: Box::new(root),
+    };
+    w.add_chain(chain);
+
+    let err = w.resolve().unwrap_err();
+    assert!(
+        err.contains("no release with a .wasm asset"),
+        "Expected no .wasm asset error, got: {}",
+        err
+    );
+}
+
+#[cfg(feature = "wasm")]
+#[test]
+fn test_resolve_unversioned_block_invalid_wasm() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use wafer_run::*;
+    use wafer_run::services::{Services, network};
+
+    struct MockNetwork;
+    impl network::NetworkService for MockNetwork {
+        fn do_request(&self, req: &network::Request) -> Result<network::Response, network::NetworkError> {
+            if req.url.contains("api.github.com") {
+                let json = r#"[{"assets":[{"name":"auth-block.wasm","browser_download_url":"https://example.com/auth-block.wasm"}]}]"#;
+                Ok(network::Response {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: json.as_bytes().to_vec(),
+                })
+            } else {
+                // Return invalid wasm bytes for the asset download
+                Ok(network::Response {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: b"this is not valid wasm".to_vec(),
+                })
+            }
+        }
+    }
+
+    let mut w = Wafer::new();
+    w.register_platform_services(Services {
+        network: Some(Arc::new(MockNetwork)),
+        ..Services::default()
+    });
+
+    let mut root = Node::new();
+    root.block = "github.com/acme/auth-block".to_string();
+
+    let chain = Chain {
+        id: "bad-wasm-test".to_string(),
+        summary: "test".to_string(),
+        config: ChainConfig::default(),
+        http: None,
+        root: Box::new(root),
+    };
+    w.add_chain(chain);
+
+    let err = w.resolve().unwrap_err();
+    assert!(
+        err.contains("failed to load remote block"),
+        "Expected WASM load error, got: {}",
+        err
+    );
+}

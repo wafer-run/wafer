@@ -1,13 +1,19 @@
 pub mod config;
+#[cfg(feature = "config-toml")]
+pub mod config_toml;
 pub mod crypto;
 pub mod database;
 #[cfg(feature = "sqlite")]
 pub mod database_sqlite;
+#[cfg(feature = "postgres")]
+pub mod database_postgres;
 pub mod logger;
 pub mod network;
 pub mod storage;
 #[cfg(feature = "storage-local")]
 pub mod storage_local;
+#[cfg(feature = "storage-s3")]
+pub mod storage_s3;
 
 use std::sync::Arc;
 

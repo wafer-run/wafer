@@ -13,6 +13,82 @@ use crate::registry::{Registry, StructBlockFactory};
 use crate::services::Services;
 use crate::types::*;
 
+/// A parsed reference to a remote block on GitHub, e.g.
+/// `"github.com/acme/auth-block@v1.0.0"`.
+#[cfg(feature = "wasm")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteBlockRef {
+    pub owner: String,
+    pub repo: String,
+    pub version: String,
+}
+
+/// Parse a block name into a `RemoteBlockRef` if it matches the
+/// `github.com/{owner}/{repo}@{version}` convention.
+///
+/// Returns `None` for local block names (no `@`, doesn't start with
+/// `github.com/`, wrong number of segments, or empty version).
+#[cfg(feature = "wasm")]
+pub fn parse_versioned_block(name: &str) -> Option<RemoteBlockRef> {
+    let at_pos = name.find('@')?;
+    let path = &name[..at_pos];
+    let version = &name[at_pos + 1..];
+
+    if version.is_empty() || version == "latest" {
+        return None;
+    }
+
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.len() != 3 || segments[0] != "github.com" {
+        return None;
+    }
+
+    Some(RemoteBlockRef {
+        owner: segments[1].to_string(),
+        repo: segments[2].to_string(),
+        version: version.to_string(),
+    })
+}
+
+/// A parsed reference to a remote block on GitHub without a version, e.g.
+/// `"github.com/acme/auth-block"`. The runtime resolves the latest release
+/// that has a `.wasm` asset.
+#[cfg(feature = "wasm")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnversionedRemoteBlockRef {
+    pub owner: String,
+    pub repo: String,
+}
+
+/// Parse a block name into an `UnversionedRemoteBlockRef` if it matches the
+/// `github.com/{owner}/{repo}` convention (no `@version` suffix).
+///
+/// Returns `None` when the name contains `@`, doesn't start with
+/// `github.com/`, or has the wrong number of segments.
+#[cfg(feature = "wasm")]
+pub fn parse_unversioned_block(name: &str) -> Option<UnversionedRemoteBlockRef> {
+    // Accept bare `github.com/owner/repo` or `github.com/owner/repo@latest`
+    let name = name.strip_suffix("@latest").unwrap_or(name);
+
+    if name.contains('@') {
+        return None;
+    }
+
+    let segments: Vec<&str> = name.split('/').collect();
+    if segments.len() != 3 || segments[0] != "github.com" {
+        return None;
+    }
+
+    if segments[1].is_empty() || segments[2].is_empty() {
+        return None;
+    }
+
+    Some(UnversionedRemoteBlockRef {
+        owner: segments[1].to_string(),
+        repo: segments[2].to_string(),
+    })
+}
+
 /// Wafer is the WAFER runtime. It manages block registration, chain storage,
 /// and execution.
 pub struct Wafer {
@@ -22,6 +98,9 @@ pub struct Wafer {
     pub(crate) named_services: Arc<HashMap<String, Box<dyn std::any::Any + Send + Sync>>>,
     pub(crate) platform_services: Option<Arc<Services>>,
     pub hooks: ObservabilityBus,
+    /// Shared WASM engine for all WASM blocks (enables epoch-based interruption).
+    #[cfg(feature = "wasm")]
+    pub(crate) wasm_engine: Option<Arc<wasmtime::Engine>>,
 }
 
 impl Wafer {
@@ -34,6 +113,8 @@ impl Wafer {
             named_services: Arc::new(HashMap::new()),
             platform_services: None,
             hooks: ObservabilityBus::new(),
+            #[cfg(feature = "wasm")]
+            wasm_engine: None,
         }
     }
 
@@ -116,11 +197,7 @@ impl Wafer {
         if !node.block.is_empty() {
             if let Some(block) = self.resolved.get(&node.block) {
                 node.resolved_block = Some(block.clone());
-            } else {
-                let factory = self
-                    .registry
-                    .get(&node.block)
-                    .ok_or_else(|| format!("block type not found: {}", node.block))?;
+            } else if let Some(factory) = self.registry.get(&node.block) {
                 let block = factory.create(node.config.as_ref());
 
                 // Initialize block
@@ -132,6 +209,7 @@ impl Wafer {
                     deadline: None,
                     named_services: self.named_services.clone(),
                     platform_services: self.platform_services.clone(),
+                    capabilities: None,
                 };
 
                 block
@@ -150,6 +228,49 @@ impl Wafer {
 
                 self.resolved.insert(node.block.clone(), block.clone());
                 node.resolved_block = Some(block);
+            } else {
+                // Try remote block download (wasm feature only)
+                #[cfg(feature = "wasm")]
+                {
+                    let block = if let Some(remote_ref) = parse_versioned_block(&node.block) {
+                        self.download_remote_block(&remote_ref)?
+                    } else if let Some(remote_ref) = parse_unversioned_block(&node.block) {
+                        self.resolve_latest_wasm_release(&remote_ref)?
+                    } else {
+                        return Err(format!("block type not found: {}", node.block));
+                    };
+
+                    let ctx = RuntimeContext {
+                        chain_id: String::new(),
+                        node_id: String::new(),
+                        config: node.config_map.clone(),
+                        cancelled: Arc::new(AtomicBool::new(false)),
+                        deadline: None,
+                        named_services: self.named_services.clone(),
+                        platform_services: self.platform_services.clone(),
+                        capabilities: None,
+                    };
+
+                    block
+                        .lifecycle(
+                            &ctx,
+                            LifecycleEvent {
+                                event_type: LifecycleType::Init,
+                                data: node
+                                    .config
+                                    .as_ref()
+                                    .map(|c| serde_json::to_vec(c).unwrap_or_default())
+                                    .unwrap_or_default(),
+                            },
+                        )
+                        .map_err(|e| format!("init remote block {:?}: {}", node.block, e))?;
+
+                    self.resolved.insert(node.block.clone(), block.clone());
+                    node.resolved_block = Some(block);
+                }
+
+                #[cfg(not(feature = "wasm"))]
+                return Err(format!("block type not found: {}", node.block));
             }
         }
 
@@ -159,11 +280,218 @@ impl Wafer {
         Ok(())
     }
 
+    /// Download a remote block from GitHub Releases and load it as a sandboxed
+    /// WASM block. The `.wasm` asset is expected at:
+    /// `https://github.com/{owner}/{repo}/releases/download/{version}/{repo}.wasm`
+    #[cfg(feature = "wasm")]
+    fn download_remote_block(&mut self, r: &RemoteBlockRef) -> Result<Arc<dyn Block>, String> {
+        use crate::services::network;
+        use crate::wasm::WASMBlock;
+        use crate::wasm::capabilities::BlockCapabilities;
+
+        let services = self
+            .platform_services
+            .as_ref()
+            .ok_or("cannot download remote block: platform services not configured")?;
+        let net = services
+            .network
+            .as_ref()
+            .ok_or("cannot download remote block: network service not available")?;
+
+        let url = format!(
+            "https://github.com/{}/{}/releases/download/{}/{}.wasm",
+            r.owner, r.repo, r.version, r.repo
+        );
+
+        let req = network::Request {
+            method: "GET".to_string(),
+            url: url.clone(),
+            headers: std::collections::HashMap::new(),
+            body: None,
+        };
+
+        let resp = net
+            .do_request(&req)
+            .map_err(|e| format!("failed to download {}: {}", url, e))?;
+
+        if resp.status_code != 200 {
+            return Err(format!(
+                "failed to download {}: HTTP {}",
+                url, resp.status_code
+            ));
+        }
+
+        if resp.body.is_empty() {
+            return Err(format!("failed to download {}: empty response body", url));
+        }
+
+        let engine = self.wasm_engine().clone();
+        let block = WASMBlock::load_with_engine(&engine, &resp.body, BlockCapabilities::none())
+            .map_err(|e| format!("failed to load remote block {}: {}", url, e))?;
+
+        Ok(Arc::new(block))
+    }
+
+    /// Resolve the latest GitHub Release that has a `.wasm` asset and load it
+    /// as a sandboxed WASM block.
+    #[cfg(feature = "wasm")]
+    fn resolve_latest_wasm_release(
+        &mut self,
+        r: &UnversionedRemoteBlockRef,
+    ) -> Result<Arc<dyn Block>, String> {
+        use crate::services::network;
+        use crate::wasm::WASMBlock;
+        use crate::wasm::capabilities::BlockCapabilities;
+
+        // Clone the Arc so we don't hold a borrow on `self` across
+        // the later `self.wasm_engine()` call.
+        let services = self
+            .platform_services
+            .clone()
+            .ok_or("cannot download remote block: platform services not configured")?;
+        let net = services
+            .network
+            .as_ref()
+            .ok_or("cannot download remote block: network service not available")?;
+
+        // 1. Fetch recent releases from the GitHub API
+        let api_url = format!(
+            "https://api.github.com/repos/{}/{}/releases?per_page=10",
+            r.owner, r.repo
+        );
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("User-Agent".to_string(), "wafer-run/0.1.0".to_string());
+        headers.insert(
+            "Accept".to_string(),
+            "application/vnd.github+json".to_string(),
+        );
+
+        let api_req = network::Request {
+            method: "GET".to_string(),
+            url: api_url.clone(),
+            headers,
+            body: None,
+        };
+
+        let api_resp = net
+            .do_request(&api_req)
+            .map_err(|e| format!("failed to fetch releases for {}/{}: {}", r.owner, r.repo, e))?;
+
+        if api_resp.status_code != 200 {
+            return Err(format!(
+                "failed to fetch releases for {}/{}: HTTP {}",
+                r.owner, r.repo, api_resp.status_code
+            ));
+        }
+
+        // 2. Parse the JSON response
+        #[derive(serde::Deserialize)]
+        struct GhAsset {
+            name: String,
+            browser_download_url: String,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct GhRelease {
+            assets: Vec<GhAsset>,
+        }
+
+        let releases: Vec<GhRelease> = serde_json::from_slice(&api_resp.body)
+            .map_err(|e| format!("failed to parse releases JSON for {}/{}: {}", r.owner, r.repo, e))?;
+
+        // 3. Find first release with a .wasm asset
+        let mut wasm_url: Option<String> = None;
+        for release in &releases {
+            for asset in &release.assets {
+                if asset.name.ends_with(".wasm") {
+                    wasm_url = Some(asset.browser_download_url.clone());
+                    break;
+                }
+            }
+            if wasm_url.is_some() {
+                break;
+            }
+        }
+
+        let wasm_url = wasm_url.ok_or_else(|| {
+            format!(
+                "no release with a .wasm asset found for {}/{}",
+                r.owner, r.repo
+            )
+        })?;
+
+        // 4. Download the .wasm asset
+        let dl_req = network::Request {
+            method: "GET".to_string(),
+            url: wasm_url.clone(),
+            headers: std::collections::HashMap::new(),
+            body: None,
+        };
+
+        let dl_resp = net
+            .do_request(&dl_req)
+            .map_err(|e| format!("failed to download {}: {}", wasm_url, e))?;
+
+        if dl_resp.status_code != 200 {
+            return Err(format!(
+                "failed to download {}: HTTP {}",
+                wasm_url, dl_resp.status_code
+            ));
+        }
+
+        if dl_resp.body.is_empty() {
+            return Err(format!(
+                "failed to download {}: empty response body",
+                wasm_url
+            ));
+        }
+
+        // 5. Load via WASM engine
+        let engine = self.wasm_engine().clone();
+        let block =
+            WASMBlock::load_with_engine(&engine, &dl_resp.body, BlockCapabilities::none())
+                .map_err(|e| {
+                    format!(
+                        "failed to load remote block {}/{}: {}",
+                        r.owner, r.repo, e
+                    )
+                })?;
+
+        Ok(Arc::new(block))
+    }
+
+    /// Get or create the shared WASM engine with hardened configuration.
+    #[cfg(feature = "wasm")]
+    pub fn wasm_engine(&mut self) -> &wasmtime::Engine {
+        if self.wasm_engine.is_none() {
+            let mut config = wasmtime::Config::new();
+            config.epoch_interruption(true);
+            let engine = wasmtime::Engine::new(&config)
+                .expect("failed to create hardened WASM engine");
+            self.wasm_engine = Some(Arc::new(engine));
+        }
+        self.wasm_engine.as_ref().unwrap()
+    }
+
     /// Start initializes the runtime.
     pub fn start(&mut self) -> Result<(), String> {
         if self.resolved.is_empty() {
-            return self.resolve();
+            self.resolve()?;
         }
+
+        // Spawn epoch ticker for WASM engine interrupt support
+        #[cfg(feature = "wasm")]
+        if let Some(ref engine) = self.wasm_engine {
+            let engine = engine.clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    engine.increment_epoch();
+                }
+            });
+        }
+
         Ok(())
     }
 
@@ -177,6 +505,7 @@ impl Wafer {
             deadline: None,
             named_services: self.named_services.clone(),
             platform_services: self.platform_services.clone(),
+            capabilities: None,
         };
         for block in self.resolved.values() {
             let _ = block.lifecycle(
@@ -285,6 +614,7 @@ impl Wafer {
             deadline,
             named_services: self.named_services.clone(),
             platform_services: self.platform_services.clone(),
+            capabilities: block.block_capabilities().cloned(),
         };
 
         // Observability: block start

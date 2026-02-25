@@ -40,6 +40,10 @@ pub use observability::{ObservabilityBus, ObservabilityContext};
 pub use registry::{BlockFactory, FuncBlock, Registry};
 pub use router::Router;
 pub use runtime::Wafer;
+#[cfg(feature = "wasm")]
+pub use runtime::{
+    parse_unversioned_block, parse_versioned_block, RemoteBlockRef, UnversionedRemoteBlockRef,
+};
 pub use types::{
     Action, InstanceMode, LifecycleEvent, LifecycleType, Message, RequestAction, Response,
     Result_, WaferError,
@@ -47,3 +51,4 @@ pub use types::{
 
 #[cfg(feature = "wasm")]
 pub use wasm::WASMBlock;
+pub use wasm::capabilities::BlockCapabilities;

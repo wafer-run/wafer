@@ -2,12 +2,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::Context;
 use crate::types::*;
+use crate::wasm::capabilities::BlockCapabilities;
 
 /// Block is the core interface every WAFER block must implement.
 pub trait Block: Send + Sync {
     fn info(&self) -> BlockInfo;
     fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_;
     fn lifecycle(&self, ctx: &dyn Context, event: LifecycleEvent) -> std::result::Result<(), WaferError>;
+
+    /// Return the capability restrictions for this block, if any.
+    /// None means unrestricted (native blocks). WASM blocks return Some(&caps).
+    fn block_capabilities(&self) -> Option<&BlockCapabilities> {
+        None
+    }
 }
 
 /// AdminUIInfo declares that a block provides an admin UI page.

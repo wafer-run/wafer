@@ -4,6 +4,7 @@ use wasmtime::*;
 use crate::block::{Block, BlockInfo};
 use crate::context::Context;
 use crate::types::*;
+use super::capabilities::BlockCapabilities;
 
 use super::host::{register_host_module, HostState};
 use super::memory::*;
@@ -16,12 +17,20 @@ fn unpack_i64(packed: i64) -> (i32, i32) {
     (ptr, len)
 }
 
+/// Create a hardened Wasmtime engine with epoch interruption enabled.
+fn hardened_engine() -> Result<Engine, String> {
+    let mut config = Config::new();
+    config.epoch_interruption(true);
+    Engine::new(&config).map_err(|e| format!("creating hardened engine: {e}"))
+}
+
 /// WASMBlock wraps a compiled WASM module and implements Block.
 pub struct WASMBlock {
     engine: Engine,
     module: Module,
     linker: Linker<HostState>,
     info_cache: Mutex<Option<BlockInfo>>,
+    capabilities: BlockCapabilities,
 }
 
 impl WASMBlock {
@@ -31,9 +40,23 @@ impl WASMBlock {
         Self::load_from_bytes(&bytes)
     }
 
-    /// Load a WASM block from raw bytes.
+    /// Load a WASM block from raw bytes (backward-compatible: unrestricted capabilities).
     pub fn load_from_bytes(wasm_bytes: &[u8]) -> Result<Self, String> {
-        let engine = Engine::default();
+        Self::load_with_capabilities(wasm_bytes, BlockCapabilities::unrestricted())
+    }
+
+    /// Load with explicit capabilities.
+    pub fn load_with_capabilities(wasm_bytes: &[u8], caps: BlockCapabilities) -> Result<Self, String> {
+        let engine = hardened_engine()?;
+        Self::build_from_engine(engine, wasm_bytes, caps)
+    }
+
+    /// Load with a shared engine and capabilities.
+    pub fn load_with_engine(engine: &Engine, wasm_bytes: &[u8], caps: BlockCapabilities) -> Result<Self, String> {
+        Self::build_from_engine(engine.clone(), wasm_bytes, caps)
+    }
+
+    fn build_from_engine(engine: Engine, wasm_bytes: &[u8], caps: BlockCapabilities) -> Result<Self, String> {
         let module =
             Module::new(&engine, wasm_bytes).map_err(|e| format!("compiling WASM module: {}", e))?;
 
@@ -57,11 +80,13 @@ impl WASMBlock {
             module,
             linker,
             info_cache: Mutex::new(None),
+            capabilities: caps,
         })
     }
 
     fn create_instance(&self, ctx: Option<Arc<dyn Context>>) -> Result<(Store<HostState>, Instance), String> {
         let mut store = Store::new(&self.engine, HostState { context: ctx });
+        store.set_epoch_deadline(10); // 10 epoch ticks = ~10 seconds with 1 tick/second
         let instance = self
             .linker
             .instantiate(&mut store, &self.module)
@@ -71,6 +96,10 @@ impl WASMBlock {
 }
 
 impl Block for WASMBlock {
+    fn block_capabilities(&self) -> Option<&BlockCapabilities> {
+        Some(&self.capabilities)
+    }
+
     fn info(&self) -> BlockInfo {
         // Check cache
         if let Ok(guard) = self.info_cache.lock() {

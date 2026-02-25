@@ -1,3 +1,4 @@
+pub mod capabilities;
 #[cfg(feature = "wasm")]
 pub mod host;
 #[cfg(feature = "wasm")]

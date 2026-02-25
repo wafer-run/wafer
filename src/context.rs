@@ -7,6 +7,7 @@ use crate::services::database::{DatabaseError, Filter, FilterOp, ListOptions, So
 use crate::services::storage::{ListOptions as StorageListOptions, StorageError};
 use crate::services::Services;
 use crate::types::*;
+use crate::wasm::capabilities::BlockCapabilities;
 
 /// CapabilityInfo describes a runtime capability.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +51,8 @@ pub struct RuntimeContext {
     pub named_services:
         std::sync::Arc<HashMap<String, Box<dyn Any + Send + Sync>>>,
     pub platform_services: Option<std::sync::Arc<Services>>,
+    /// Capability restrictions for this block. None = unrestricted (native blocks).
+    pub capabilities: Option<BlockCapabilities>,
 }
 
 // --- Wire format types for deserializing guest messages ---
@@ -285,8 +288,175 @@ impl Context for RuntimeContext {
 }
 
 impl RuntimeContext {
+    /// Check whether the given URL targets a private/internal IP or uses a
+    /// non-HTTP scheme. This is a defense-in-depth SSRF filter applied to ALL
+    /// blocks (not just capability-restricted ones).
+    fn is_blocked_url(url: &str) -> bool {
+        // Block non-HTTP(S) schemes
+        let lower = url.to_ascii_lowercase();
+        if !lower.starts_with("http://") && !lower.starts_with("https://") {
+            return true;
+        }
+
+        // Extract host portion (strip scheme, path, port)
+        let after_scheme = if lower.starts_with("https://") {
+            &url[8..]
+        } else {
+            &url[7..]
+        };
+        let host = after_scheme
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .split(':')
+            .next()
+            .unwrap_or("");
+
+        // Check for private/internal IPs
+        if host == "localhost" {
+            return true;
+        }
+
+        // Try to parse as IP
+        if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+            let octets = ip.octets();
+            // 127.0.0.0/8
+            if octets[0] == 127 {
+                return true;
+            }
+            // 10.0.0.0/8
+            if octets[0] == 10 {
+                return true;
+            }
+            // 172.16.0.0/12
+            if octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31) {
+                return true;
+            }
+            // 192.168.0.0/16
+            if octets[0] == 192 && octets[1] == 168 {
+                return true;
+            }
+            // 169.254.169.254 (AWS metadata)
+            if octets[0] == 169 && octets[1] == 254 && octets[2] == 169 && octets[3] == 254 {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Check capability restrictions before dispatching. Returns Some(err) if blocked.
+    fn check_capability(&self, svc_kind: &str, msg: &Message) -> Option<Result_> {
+        let caps = match &self.capabilities {
+            Some(c) => c,
+            None => return None, // No restrictions (native block)
+        };
+
+        // Logger is always allowed
+        if svc_kind.starts_with("logger.") {
+            return None;
+        }
+
+        // Database operations
+        if svc_kind.starts_with("database.") {
+            if svc_kind == "database.query_raw" || svc_kind == "database.exec_raw" {
+                if !caps.raw_sql {
+                    return Some(err_result(
+                        "capability_denied",
+                        format!("block not allowed to use {svc_kind}: raw_sql not permitted"),
+                    ));
+                }
+            } else {
+                let collection = msg.get_meta("collection");
+                if !collection.is_empty() && !caps.allows_collection(collection) {
+                    return Some(err_result(
+                        "capability_denied",
+                        format!(
+                            "block not allowed to access collection {:?}",
+                            collection
+                        ),
+                    ));
+                }
+            }
+            return None;
+        }
+
+        // Storage operations
+        if svc_kind.starts_with("storage.") {
+            let bucket = msg.get_meta("bucket");
+            if !bucket.is_empty() && !caps.allows_storage_folder(bucket) {
+                return Some(err_result(
+                    "capability_denied",
+                    format!("block not allowed to access storage folder {:?}", bucket),
+                ));
+            }
+            return None;
+        }
+
+        // Crypto operations
+        if svc_kind.starts_with("crypto.") {
+            if !caps.crypto {
+                return Some(err_result(
+                    "capability_denied",
+                    "block not allowed to use crypto service",
+                ));
+            }
+            return None;
+        }
+
+        // Network operations
+        if svc_kind == "network.do" {
+            if !caps.network {
+                return Some(err_result(
+                    "capability_denied",
+                    "block not allowed to use network service",
+                ));
+            }
+            // Check URL allowlist
+            #[derive(serde::Deserialize)]
+            struct UrlPeek {
+                #[serde(default)]
+                url: String,
+            }
+            if let Ok(peek) = serde_json::from_slice::<UrlPeek>(&msg.data) {
+                if !caps.allows_network_url(&peek.url) {
+                    return Some(err_result(
+                        "capability_denied",
+                        format!("block not allowed to access URL {:?}", peek.url),
+                    ));
+                }
+            }
+            return None;
+        }
+
+        // Config operations
+        if svc_kind.starts_with("config.") {
+            if !caps.config {
+                return Some(err_result(
+                    "capability_denied",
+                    "block not allowed to use config service",
+                ));
+            }
+            let key = msg.get_meta("key");
+            if !key.is_empty() && !caps.allows_config_key(key) {
+                return Some(err_result(
+                    "capability_denied",
+                    format!("block not allowed to access config key {:?}", key),
+                ));
+            }
+            return None;
+        }
+
+        None
+    }
+
     /// Dispatch a svc.* message to the appropriate platform service.
     fn dispatch_service(&self, svc_kind: &str, msg: &Message) -> Result_ {
+        // Capability enforcement
+        if let Some(denied) = self.check_capability(svc_kind, msg) {
+            return denied;
+        }
+
         let services = match &self.platform_services {
             Some(s) => s,
             None => return err_result("unavailable", "platform services not configured"),
@@ -640,6 +810,16 @@ impl RuntimeContext {
                         )
                     }
                 };
+                // SSRF defense-in-depth: block private IPs and non-HTTP schemes
+                if Self::is_blocked_url(&wire_req.url) {
+                    return err_result(
+                        "ssrf_blocked",
+                        format!(
+                            "network request to {:?} blocked: private/internal address or disallowed scheme",
+                            wire_req.url
+                        ),
+                    );
+                }
                 let body = match &wire_req.body {
                     Some(serde_json::Value::String(s)) => Some(s.as_bytes().to_vec()),
                     Some(serde_json::Value::Array(_)) | Some(serde_json::Value::Object(_)) => {
