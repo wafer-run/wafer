@@ -3,6 +3,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::common::ErrorCode;
 use crate::services::database::{DatabaseError, Filter, FilterOp, ListOptions, SortField};
 use crate::services::storage::{ListOptions as StorageListOptions, StorageError};
 use crate::services::Services;
@@ -158,7 +159,7 @@ fn ok_continue() -> Result_ {
     }
 }
 
-fn err_result(code: &str, message: impl Into<String>) -> Result_ {
+fn err_result(code: impl Into<String>, message: impl Into<String>) -> Result_ {
     Result_ {
         action: Action::Error,
         response: None,
@@ -170,23 +171,30 @@ fn err_result(code: &str, message: impl Into<String>) -> Result_ {
 fn json_respond<T: Serialize>(v: &T) -> Result_ {
     match serde_json::to_vec(v) {
         Ok(data) => ok_respond(data),
-        Err(e) => err_result("internal", format!("failed to serialize response: {e}")),
+        Err(e) => err_result(ErrorCode::INTERNAL, format!("failed to serialize response: {e}")),
     }
+}
+
+/// Helper to require a service or return an UNAVAILABLE error.
+fn require_service<'a, T>(service: &'a Option<T>, name: &str) -> std::result::Result<&'a T, Result_> {
+    service
+        .as_ref()
+        .ok_or_else(|| err_result(ErrorCode::UNAVAILABLE, format!("{name} service not configured")))
 }
 
 fn db_err(e: DatabaseError) -> Result_ {
     match e {
-        DatabaseError::NotFound => err_result("not_found", "record not found"),
-        DatabaseError::Internal(msg) => err_result("internal", msg),
-        DatabaseError::Other(err) => err_result("internal", err.to_string()),
+        DatabaseError::NotFound => err_result(ErrorCode::NOT_FOUND, "record not found"),
+        DatabaseError::Internal(msg) => err_result(ErrorCode::INTERNAL, msg),
+        DatabaseError::Other(err) => err_result(ErrorCode::INTERNAL, err.to_string()),
     }
 }
 
 fn storage_err(e: StorageError) -> Result_ {
     match e {
-        StorageError::NotFound => err_result("not_found", "object not found"),
-        StorageError::Internal(msg) => err_result("internal", msg),
-        StorageError::Other(err) => err_result("internal", err.to_string()),
+        StorageError::NotFound => err_result(ErrorCode::NOT_FOUND, "object not found"),
+        StorageError::Internal(msg) => err_result(ErrorCode::INTERNAL, msg),
+        StorageError::Other(err) => err_result(ErrorCode::INTERNAL, err.to_string()),
     }
 }
 
@@ -235,10 +243,10 @@ impl Context for RuntimeContext {
                 let key = msg.get_meta("key");
                 match self.config.get(key) {
                     Some(val) => ok_respond(val.as_bytes().to_vec()),
-                    None => err_result("not_found", format!("config key not found: {key}")),
+                    None => err_result(ErrorCode::NOT_FOUND, format!("config key not found: {key}")),
                 }
             }
-            _ => err_result("unavailable", format!("unknown capability: {kind}")),
+            _ => err_result(ErrorCode::UNAVAILABLE, format!("unknown capability: {kind}")),
         }
     }
 
@@ -288,63 +296,6 @@ impl Context for RuntimeContext {
 }
 
 impl RuntimeContext {
-    /// Check whether the given URL targets a private/internal IP or uses a
-    /// non-HTTP scheme. This is a defense-in-depth SSRF filter applied to ALL
-    /// blocks (not just capability-restricted ones).
-    fn is_blocked_url(url: &str) -> bool {
-        // Block non-HTTP(S) schemes
-        let lower = url.to_ascii_lowercase();
-        if !lower.starts_with("http://") && !lower.starts_with("https://") {
-            return true;
-        }
-
-        // Extract host portion (strip scheme, path, port)
-        let after_scheme = if lower.starts_with("https://") {
-            &url[8..]
-        } else {
-            &url[7..]
-        };
-        let host = after_scheme
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .split(':')
-            .next()
-            .unwrap_or("");
-
-        // Check for private/internal IPs
-        if host == "localhost" {
-            return true;
-        }
-
-        // Try to parse as IP
-        if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
-            let octets = ip.octets();
-            // 127.0.0.0/8
-            if octets[0] == 127 {
-                return true;
-            }
-            // 10.0.0.0/8
-            if octets[0] == 10 {
-                return true;
-            }
-            // 172.16.0.0/12
-            if octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31) {
-                return true;
-            }
-            // 192.168.0.0/16
-            if octets[0] == 192 && octets[1] == 168 {
-                return true;
-            }
-            // 169.254.169.254 (AWS metadata)
-            if octets[0] == 169 && octets[1] == 254 && octets[2] == 169 && octets[3] == 254 {
-                return true;
-            }
-        }
-
-        false
-    }
-
     /// Check capability restrictions before dispatching. Returns Some(err) if blocked.
     fn check_capability(&self, svc_kind: &str, msg: &Message) -> Option<Result_> {
         let caps = match &self.capabilities {
@@ -362,7 +313,7 @@ impl RuntimeContext {
             if svc_kind == "database.query_raw" || svc_kind == "database.exec_raw" {
                 if !caps.raw_sql {
                     return Some(err_result(
-                        "capability_denied",
+                        ErrorCode::PERMISSION_DENIED,
                         format!("block not allowed to use {svc_kind}: raw_sql not permitted"),
                     ));
                 }
@@ -370,7 +321,7 @@ impl RuntimeContext {
                 let collection = msg.get_meta("collection");
                 if !collection.is_empty() && !caps.allows_collection(collection) {
                     return Some(err_result(
-                        "capability_denied",
+                        ErrorCode::PERMISSION_DENIED,
                         format!(
                             "block not allowed to access collection {:?}",
                             collection
@@ -386,7 +337,7 @@ impl RuntimeContext {
             let bucket = msg.get_meta("bucket");
             if !bucket.is_empty() && !caps.allows_storage_folder(bucket) {
                 return Some(err_result(
-                    "capability_denied",
+                    ErrorCode::PERMISSION_DENIED,
                     format!("block not allowed to access storage folder {:?}", bucket),
                 ));
             }
@@ -397,7 +348,7 @@ impl RuntimeContext {
         if svc_kind.starts_with("crypto.") {
             if !caps.crypto {
                 return Some(err_result(
-                    "capability_denied",
+                    ErrorCode::PERMISSION_DENIED,
                     "block not allowed to use crypto service",
                 ));
             }
@@ -408,7 +359,7 @@ impl RuntimeContext {
         if svc_kind == "network.do" {
             if !caps.network {
                 return Some(err_result(
-                    "capability_denied",
+                    ErrorCode::PERMISSION_DENIED,
                     "block not allowed to use network service",
                 ));
             }
@@ -421,7 +372,7 @@ impl RuntimeContext {
             if let Ok(peek) = serde_json::from_slice::<UrlPeek>(&msg.data) {
                 if !caps.allows_network_url(&peek.url) {
                     return Some(err_result(
-                        "capability_denied",
+                        ErrorCode::PERMISSION_DENIED,
                         format!("block not allowed to access URL {:?}", peek.url),
                     ));
                 }
@@ -433,14 +384,14 @@ impl RuntimeContext {
         if svc_kind.starts_with("config.") {
             if !caps.config {
                 return Some(err_result(
-                    "capability_denied",
+                    ErrorCode::PERMISSION_DENIED,
                     "block not allowed to use config service",
                 ));
             }
             let key = msg.get_meta("key");
             if !key.is_empty() && !caps.allows_config_key(key) {
                 return Some(err_result(
-                    "capability_denied",
+                    ErrorCode::PERMISSION_DENIED,
                     format!("block not allowed to access config key {:?}", key),
                 ));
             }
@@ -459,15 +410,15 @@ impl RuntimeContext {
 
         let services = match &self.platform_services {
             Some(s) => s,
-            None => return err_result("unavailable", "platform services not configured"),
+            None => return err_result(ErrorCode::UNAVAILABLE, "platform services not configured"),
         };
 
         match svc_kind {
             // --- Database ---
             "database.get" => {
-                let db = match &services.database {
-                    Some(db) => db,
-                    None => return err_result("unavailable", "database service not configured"),
+                let db = match require_service(&services.database, "database") {
+                    Ok(db) => db,
+                    Err(e) => return e,
                 };
                 let collection = msg.get_meta("collection");
                 let id = msg.get_meta("id");
@@ -478,9 +429,9 @@ impl RuntimeContext {
             }
 
             "database.list" => {
-                let db = match &services.database {
-                    Some(db) => db,
-                    None => return err_result("unavailable", "database service not configured"),
+                let db = match require_service(&services.database, "database") {
+                    Ok(db) => db,
+                    Err(e) => return e,
                 };
                 let collection = msg.get_meta("collection");
                 let opts = if msg.data.is_empty() {
@@ -490,7 +441,7 @@ impl RuntimeContext {
                         Ok(wire) => wire.into_list_options(),
                         Err(e) => {
                             return err_result(
-                                "invalid_argument",
+                                ErrorCode::INVALID_ARGUMENT,
                                 format!("invalid list options: {e}"),
                             )
                         }
@@ -503,16 +454,16 @@ impl RuntimeContext {
             }
 
             "database.create" => {
-                let db = match &services.database {
-                    Some(db) => db,
-                    None => return err_result("unavailable", "database service not configured"),
+                let db = match require_service(&services.database, "database") {
+                    Ok(db) => db,
+                    Err(e) => return e,
                 };
                 let collection = msg.get_meta("collection");
                 let data: HashMap<String, serde_json::Value> = match serde_json::from_slice(&msg.data) {
                     Ok(d) => d,
                     Err(e) => {
                         return err_result(
-                            "invalid_argument",
+                            ErrorCode::INVALID_ARGUMENT,
                             format!("invalid record data: {e}"),
                         )
                     }
@@ -524,9 +475,9 @@ impl RuntimeContext {
             }
 
             "database.update" => {
-                let db = match &services.database {
-                    Some(db) => db,
-                    None => return err_result("unavailable", "database service not configured"),
+                let db = match require_service(&services.database, "database") {
+                    Ok(db) => db,
+                    Err(e) => return e,
                 };
                 let collection = msg.get_meta("collection");
                 let id = msg.get_meta("id");
@@ -534,7 +485,7 @@ impl RuntimeContext {
                     Ok(d) => d,
                     Err(e) => {
                         return err_result(
-                            "invalid_argument",
+                            ErrorCode::INVALID_ARGUMENT,
                             format!("invalid record data: {e}"),
                         )
                     }
@@ -546,9 +497,9 @@ impl RuntimeContext {
             }
 
             "database.delete" => {
-                let db = match &services.database {
-                    Some(db) => db,
-                    None => return err_result("unavailable", "database service not configured"),
+                let db = match require_service(&services.database, "database") {
+                    Ok(db) => db,
+                    Err(e) => return e,
                 };
                 let collection = msg.get_meta("collection");
                 let id = msg.get_meta("id");
@@ -559,9 +510,9 @@ impl RuntimeContext {
             }
 
             "database.count" => {
-                let db = match &services.database {
-                    Some(db) => db,
-                    None => return err_result("unavailable", "database service not configured"),
+                let db = match require_service(&services.database, "database") {
+                    Ok(db) => db,
+                    Err(e) => return e,
                 };
                 let collection = msg.get_meta("collection");
                 let filters: Vec<Filter> = if msg.data.is_empty() {
@@ -578,7 +529,7 @@ impl RuntimeContext {
                             .collect(),
                         Err(e) => {
                             return err_result(
-                                "invalid_argument",
+                                ErrorCode::INVALID_ARGUMENT,
                                 format!("invalid filters: {e}"),
                             )
                         }
@@ -591,9 +542,9 @@ impl RuntimeContext {
             }
 
             "database.query_raw" => {
-                let db = match &services.database {
-                    Some(db) => db,
-                    None => return err_result("unavailable", "database service not configured"),
+                let db = match require_service(&services.database, "database") {
+                    Ok(db) => db,
+                    Err(e) => return e,
                 };
                 #[derive(Deserialize)]
                 struct RawQuery {
@@ -604,7 +555,7 @@ impl RuntimeContext {
                 let rq: RawQuery = match serde_json::from_slice(&msg.data) {
                     Ok(q) => q,
                     Err(e) => {
-                        return err_result("invalid_argument", format!("invalid query: {e}"))
+                        return err_result(ErrorCode::INVALID_ARGUMENT, format!("invalid query: {e}"))
                     }
                 };
                 match db.query_raw(&rq.query, &rq.args) {
@@ -614,9 +565,9 @@ impl RuntimeContext {
             }
 
             "database.exec_raw" => {
-                let db = match &services.database {
-                    Some(db) => db,
-                    None => return err_result("unavailable", "database service not configured"),
+                let db = match require_service(&services.database, "database") {
+                    Ok(db) => db,
+                    Err(e) => return e,
                 };
                 #[derive(Deserialize)]
                 struct RawExec {
@@ -627,7 +578,7 @@ impl RuntimeContext {
                 let rq: RawExec = match serde_json::from_slice(&msg.data) {
                     Ok(q) => q,
                     Err(e) => {
-                        return err_result("invalid_argument", format!("invalid query: {e}"))
+                        return err_result(ErrorCode::INVALID_ARGUMENT, format!("invalid query: {e}"))
                     }
                 };
                 match db.exec_raw(&rq.query, &rq.args) {
@@ -638,9 +589,9 @@ impl RuntimeContext {
 
             // --- Storage ---
             "storage.put" => {
-                let storage = match &services.storage {
-                    Some(s) => s,
-                    None => return err_result("unavailable", "storage service not configured"),
+                let storage = match require_service(&services.storage, "storage") {
+                    Ok(s) => s,
+                    Err(e) => return e,
                 };
                 let bucket = msg.get_meta("bucket");
                 let key = msg.get_meta("key");
@@ -659,9 +610,9 @@ impl RuntimeContext {
             }
 
             "storage.get" => {
-                let storage = match &services.storage {
-                    Some(s) => s,
-                    None => return err_result("unavailable", "storage service not configured"),
+                let storage = match require_service(&services.storage, "storage") {
+                    Ok(s) => s,
+                    Err(e) => return e,
                 };
                 let bucket = msg.get_meta("bucket");
                 let key = msg.get_meta("key");
@@ -672,9 +623,9 @@ impl RuntimeContext {
             }
 
             "storage.delete" => {
-                let storage = match &services.storage {
-                    Some(s) => s,
-                    None => return err_result("unavailable", "storage service not configured"),
+                let storage = match require_service(&services.storage, "storage") {
+                    Ok(s) => s,
+                    Err(e) => return e,
                 };
                 let bucket = msg.get_meta("bucket");
                 let key = msg.get_meta("key");
@@ -685,9 +636,9 @@ impl RuntimeContext {
             }
 
             "storage.list" => {
-                let storage = match &services.storage {
-                    Some(s) => s,
-                    None => return err_result("unavailable", "storage service not configured"),
+                let storage = match require_service(&services.storage, "storage") {
+                    Ok(s) => s,
+                    Err(e) => return e,
                 };
                 let bucket = msg.get_meta("bucket");
                 let opts = StorageListOptions {
@@ -706,35 +657,35 @@ impl RuntimeContext {
 
             // --- Crypto ---
             "crypto.hash" => {
-                let crypto = match &services.crypto {
-                    Some(c) => c,
-                    None => return err_result("unavailable", "crypto service not configured"),
+                let crypto = match require_service(&services.crypto, "crypto") {
+                    Ok(c) => c,
+                    Err(e) => return e,
                 };
                 let password = String::from_utf8_lossy(&msg.data);
                 match crypto.hash(&password) {
                     Ok(hash) => ok_respond(hash.into_bytes()),
-                    Err(e) => err_result("internal", e.to_string()),
+                    Err(e) => err_result(ErrorCode::INTERNAL, e.to_string()),
                 }
             }
 
             "crypto.compare_hash" => {
-                let crypto = match &services.crypto {
-                    Some(c) => c,
-                    None => return err_result("unavailable", "crypto service not configured"),
+                let crypto = match require_service(&services.crypto, "crypto") {
+                    Ok(c) => c,
+                    Err(e) => return e,
                 };
                 let password = String::from_utf8_lossy(&msg.data);
                 let hash = msg.get_meta("hash");
                 match crypto.compare_hash(&password, hash) {
                     Ok(()) => ok_respond(b"true".to_vec()), // match
                     Err(crate::services::crypto::CryptoError::PasswordMismatch) => ok_continue(), // no match
-                    Err(e) => err_result("internal", e.to_string()),
+                    Err(e) => err_result(ErrorCode::INTERNAL, e.to_string()),
                 }
             }
 
             "crypto.sign" => {
-                let crypto = match &services.crypto {
-                    Some(c) => c,
-                    None => return err_result("unavailable", "crypto service not configured"),
+                let crypto = match require_service(&services.crypto, "crypto") {
+                    Ok(c) => c,
+                    Err(e) => return e,
                 };
                 // Data contains JSON-encoded claims map
                 let claims: HashMap<String, serde_json::Value> =
@@ -742,7 +693,7 @@ impl RuntimeContext {
                         Ok(c) => c,
                         Err(e) => {
                             return err_result(
-                                "invalid_argument",
+                                ErrorCode::INVALID_ARGUMENT,
                                 format!("invalid claims JSON: {e}"),
                             )
                         }
@@ -755,26 +706,26 @@ impl RuntimeContext {
                 let expiry = Duration::from_secs(expiry_secs);
                 match crypto.sign(claims, expiry) {
                     Ok(token) => ok_respond(token.into_bytes()),
-                    Err(e) => err_result("internal", e.to_string()),
+                    Err(e) => err_result(ErrorCode::INTERNAL, e.to_string()),
                 }
             }
 
             "crypto.verify" => {
-                let crypto = match &services.crypto {
-                    Some(c) => c,
-                    None => return err_result("unavailable", "crypto service not configured"),
+                let crypto = match require_service(&services.crypto, "crypto") {
+                    Ok(c) => c,
+                    Err(e) => return e,
                 };
                 let token = String::from_utf8_lossy(&msg.data);
                 match crypto.verify(&token) {
                     Ok(claims) => json_respond(&claims),
-                    Err(e) => err_result("unauthenticated", e.to_string()),
+                    Err(e) => err_result(ErrorCode::UNAUTHENTICATED, e.to_string()),
                 }
             }
 
             "crypto.random_bytes" => {
-                let crypto = match &services.crypto {
-                    Some(c) => c,
-                    None => return err_result("unavailable", "crypto service not configured"),
+                let crypto = match require_service(&services.crypto, "crypto") {
+                    Ok(c) => c,
+                    Err(e) => return e,
                 };
                 let length: usize = msg
                     .get_meta("length")
@@ -782,15 +733,15 @@ impl RuntimeContext {
                     .unwrap_or(32);
                 match crypto.random_bytes(length) {
                     Ok(bytes) => ok_respond(bytes),
-                    Err(e) => err_result("internal", e.to_string()),
+                    Err(e) => err_result(ErrorCode::INTERNAL, e.to_string()),
                 }
             }
 
             // --- Network ---
             "network.do" => {
-                let network = match &services.network {
-                    Some(n) => n,
-                    None => return err_result("unavailable", "network service not configured"),
+                let network = match require_service(&services.network, "network") {
+                    Ok(n) => n,
+                    Err(e) => return e,
                 };
                 #[derive(Deserialize)]
                 struct WireNetworkRequest {
@@ -805,15 +756,15 @@ impl RuntimeContext {
                     Ok(r) => r,
                     Err(e) => {
                         return err_result(
-                            "invalid_argument",
+                            ErrorCode::INVALID_ARGUMENT,
                             format!("invalid network request: {e}"),
                         )
                     }
                 };
                 // SSRF defense-in-depth: block private IPs and non-HTTP schemes
-                if Self::is_blocked_url(&wire_req.url) {
+                if crate::security::is_blocked_url(&wire_req.url) {
                     return err_result(
-                        "ssrf_blocked",
+                        ErrorCode::PERMISSION_DENIED,
                         format!(
                             "network request to {:?} blocked: private/internal address or disallowed scheme",
                             wire_req.url
@@ -850,12 +801,12 @@ impl RuntimeContext {
                         match serde_json::to_vec(&wire_resp) {
                             Ok(data) => ok_respond(data),
                             Err(e) => err_result(
-                                "internal",
+                                ErrorCode::INTERNAL,
                                 format!("failed to serialize network response: {e}"),
                             ),
                         }
                     }
-                    Err(e) => err_result("internal", e.to_string()),
+                    Err(e) => err_result(ErrorCode::INTERNAL, e.to_string()),
                 }
             }
 
@@ -883,7 +834,7 @@ impl RuntimeContext {
                         return match self.config.get(key) {
                             Some(val) => ok_respond(val.as_bytes().to_vec()),
                             None => err_result(
-                                "not_found",
+                                ErrorCode::NOT_FOUND,
                                 format!("config key not found: {key}"),
                             ),
                         };
@@ -892,14 +843,14 @@ impl RuntimeContext {
                 let key = msg.get_meta("key");
                 match config.get(key) {
                     Some(val) => ok_respond(val.into_bytes()),
-                    None => err_result("not_found", format!("config key not found: {key}")),
+                    None => err_result(ErrorCode::NOT_FOUND, format!("config key not found: {key}")),
                 }
             }
 
             "config.set" => {
-                let config = match &services.config {
-                    Some(c) => c,
-                    None => return err_result("unavailable", "config service not configured"),
+                let config = match require_service(&services.config, "config") {
+                    Ok(c) => c,
+                    Err(e) => return e,
                 };
                 let key = msg.get_meta("key");
                 let value = String::from_utf8_lossy(&msg.data);
@@ -908,7 +859,7 @@ impl RuntimeContext {
             }
 
             _ => err_result(
-                "unavailable",
+                ErrorCode::UNAVAILABLE,
                 format!("unknown service capability: svc.{svc_kind}"),
             ),
         }

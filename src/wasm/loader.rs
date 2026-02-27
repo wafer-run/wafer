@@ -1,33 +1,27 @@
 use std::sync::{Arc, Mutex};
 use wasmtime::*;
+use wasmtime::component::{Component, Linker};
 
 use crate::block::{Block, BlockInfo};
+use crate::common::ErrorCode;
 use crate::context::Context;
 use crate::types::*;
 use super::capabilities::BlockCapabilities;
+use super::bindings::WaferBlock;
+use super::host::HostState;
 
-use super::host::{register_host_module, HostState};
-use super::memory::*;
-
-/// Unpack a packed i64 into (ptr, len).
-/// High 32 bits = pointer, low 32 bits = length.
-fn unpack_i64(packed: i64) -> (i32, i32) {
-    let ptr = (packed >> 32) as i32;
-    let len = (packed & 0xFFFF_FFFF) as i32;
-    (ptr, len)
-}
-
-/// Create a hardened Wasmtime engine with epoch interruption enabled.
+/// Create a hardened Wasmtime engine with epoch interruption and component model enabled.
 fn hardened_engine() -> Result<Engine, String> {
     let mut config = Config::new();
     config.epoch_interruption(true);
+    config.wasm_component_model(true);
     Engine::new(&config).map_err(|e| format!("creating hardened engine: {e}"))
 }
 
-/// WASMBlock wraps a compiled WASM module and implements Block.
+/// WASMBlock wraps a compiled WASM component and implements Block.
 pub struct WASMBlock {
     engine: Engine,
-    module: Module,
+    component: Component,
     linker: Linker<HostState>,
     info_cache: Mutex<Option<BlockInfo>>,
     capabilities: BlockCapabilities,
@@ -57,41 +51,33 @@ impl WASMBlock {
     }
 
     fn build_from_engine(engine: Engine, wasm_bytes: &[u8], caps: BlockCapabilities) -> Result<Self, String> {
-        let module =
-            Module::new(&engine, wasm_bytes).map_err(|e| format!("compiling WASM module: {}", e))?;
+        let component = Component::new(&engine, wasm_bytes)
+            .map_err(|e| format!("compiling WASM component: {}", e))?;
 
         let mut linker = Linker::new(&engine);
 
-        // Register host module
-        register_host_module(&mut linker)?;
-
-        // Validate required exports
-        for name in &["info", "handle", "lifecycle", "malloc"] {
-            let has_export = module
-                .exports()
-                .any(|e| e.name() == *name);
-            if !has_export {
-                return Err(format!("WASM module missing required export: {}", name));
-            }
-        }
+        // Add all host interface implementations to the linker.
+        WaferBlock::add_to_linker(&mut linker, |state: &mut HostState| state)
+            .map_err(|e| format!("linking host interfaces: {}", e))?;
 
         Ok(Self {
             engine,
-            module,
+            component,
             linker,
             info_cache: Mutex::new(None),
             capabilities: caps,
         })
     }
 
-    fn create_instance(&self, ctx: Option<Arc<dyn Context>>) -> Result<(Store<HostState>, Instance), String> {
-        let mut store = Store::new(&self.engine, HostState { context: ctx });
+    fn create_instance(&self, ctx: Option<Arc<dyn Context>>) -> Result<(Store<HostState>, WaferBlock), String> {
+        let mut store = Store::new(&self.engine, HostState {
+            context: ctx,
+            capabilities: self.capabilities.clone(),
+        });
         store.set_epoch_deadline(10); // 10 epoch ticks = ~10 seconds with 1 tick/second
-        let instance = self
-            .linker
-            .instantiate(&mut store, &self.module)
-            .map_err(|e| format!("instantiating WASM module: {}", e))?;
-        Ok((store, instance))
+        let block = WaferBlock::instantiate(&mut store, &self.component, &self.linker)
+            .map_err(|e| format!("instantiating WASM component: {}", e))?;
+        Ok((store, block))
     }
 }
 
@@ -108,7 +94,7 @@ impl Block for WASMBlock {
             }
         }
 
-        let (mut store, instance) = match self.create_instance(None) {
+        let (mut store, block) = match self.create_instance(None) {
             Ok(r) => r,
             Err(e) => {
                 return BlockInfo {
@@ -123,23 +109,8 @@ impl Block for WASMBlock {
             }
         };
 
-        let info_fn = match instance.get_typed_func::<(), i64>(&mut store, "info") {
-            Ok(f) => f,
-            Err(e) => {
-                return BlockInfo {
-                    name: "unknown".to_string(),
-                    version: "0.0.0".to_string(),
-                    interface: "error".to_string(),
-                    summary: format!("info export not found: {}", e),
-                    instance_mode: InstanceMode::PerNode,
-                    allowed_modes: Vec::new(),
-                    admin_ui: None,
-                };
-            }
-        };
-
-        let (ptr, len) = match info_fn.call(&mut store, ()) {
-            Ok(packed) => unpack_i64(packed),
+        let wit_info = match block.wafer_block_world_block().call_info(&mut store) {
+            Ok(i) => i,
             Err(e) => {
                 return BlockInfo {
                     name: "unknown".to_string(),
@@ -153,37 +124,7 @@ impl Block for WASMBlock {
             }
         };
 
-        let data = match read_from_memory(&mut store, &instance, ptr as u32, len as u32) {
-            Ok(d) => d,
-            Err(e) => {
-                return BlockInfo {
-                    name: "unknown".to_string(),
-                    version: "0.0.0".to_string(),
-                    interface: "error".to_string(),
-                    summary: format!("reading info from memory: {}", e),
-                    instance_mode: InstanceMode::PerNode,
-                    allowed_modes: Vec::new(),
-                    admin_ui: None,
-                };
-            }
-        };
-
-        let wbi: WasmBlockInfo = match serde_json::from_slice(&data) {
-            Ok(i) => i,
-            Err(e) => {
-                return BlockInfo {
-                    name: "unknown".to_string(),
-                    version: "0.0.0".to_string(),
-                    interface: "error".to_string(),
-                    summary: format!("parsing info: {}", e),
-                    instance_mode: InstanceMode::PerNode,
-                    allowed_modes: Vec::new(),
-                    admin_ui: None,
-                };
-            }
-        };
-
-        let info = block_info_from_wasm(wbi);
+        let info = block_info_from_wit(wit_info);
 
         // Cache it
         if let Ok(mut guard) = self.info_cache.lock() {
@@ -194,8 +135,6 @@ impl Block for WASMBlock {
     }
 
     fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
-        // We need to create a fresh instance for each handle call
-        // because WASM instances are not thread-safe.
         // SAFETY: The WASM call is synchronous — ctx outlives the call and the
         // Arc is dropped before this function returns.
         let ctx_arc: Arc<dyn Context> = unsafe {
@@ -204,69 +143,31 @@ impl Block for WASMBlock {
             Arc::new(ContextWrapper(ctx_static))
         };
 
-        let (mut store, instance) = match self.create_instance(Some(ctx_arc)) {
+        let (mut store, block) = match self.create_instance(Some(ctx_arc)) {
             Ok(r) => r,
             Err(e) => {
-                return msg.clone().err(WaferError::new("wasm_error", e));
+                return msg.clone().err(WaferError::new(ErrorCode::INTERNAL, e));
             }
         };
 
-        let handle_fn = match instance.get_typed_func::<(i32, i32), i64>(&mut store, "handle") {
-            Ok(f) => f,
-            Err(e) => {
-                return msg.clone().err(WaferError::new(
-                    "wasm_error",
-                    format!("handle export not found: {}", e),
-                ));
-            }
-        };
+        let wit_msg = message_to_wit(msg);
 
-        // Write message to WASM memory
-        let wm = message_to_wasm(msg);
-        let msg_data = match serde_json::to_vec(&wm) {
-            Ok(d) => d,
-            Err(e) => {
-                return msg.clone().err(WaferError::new("wasm_memory_error", e.to_string()));
-            }
-        };
-
-        let (msg_ptr, msg_len) = match write_to_memory(&mut store, &instance, &msg_data) {
+        let wit_result = match block.wafer_block_world_block().call_handle(&mut store, &wit_msg) {
             Ok(r) => r,
             Err(e) => {
-                return msg.clone().err(WaferError::new("wasm_memory_error", e));
-            }
-        };
-
-        // Call handle
-        let (result_ptr, result_len) = match handle_fn.call(&mut store, (msg_ptr as i32, msg_len as i32)) {
-            Ok(packed) => unpack_i64(packed),
-            Err(e) => {
                 return msg.clone().err(WaferError::new(
-                    "wasm_call_error",
+                    ErrorCode::INTERNAL,
                     format!("calling handle: {}", e),
                 ));
             }
         };
 
-        let result_data = match read_from_memory(&mut store, &instance, result_ptr as u32, result_len as u32) {
-            Ok(d) => d,
-            Err(e) => {
-                return msg.clone().err(WaferError::new("wasm_decode_error", e));
-            }
-        };
-
-        let wr: WasmResult = match serde_json::from_slice(&result_data) {
-            Ok(r) => r,
-            Err(e) => {
-                return msg.clone().err(WaferError::new(
-                    "wasm_decode_error",
-                    format!("reading result: {}", e),
-                ));
-            }
-        };
-
-        let mut result = result_from_wasm(wr);
-        result.message = Some(msg.clone());
+        let mut result = result_from_wit(wit_result);
+        // Preserve the guest's returned message if present; fall back to the
+        // original only when the guest returned None.
+        if result.message.is_none() {
+            result.message = Some(msg.clone());
+        }
         result
     }
 
@@ -282,55 +183,151 @@ impl Block for WASMBlock {
             Arc::new(ContextWrapper(ctx_static))
         };
 
-        let (mut store, instance) = self
+        let (mut store, block_instance) = self
             .create_instance(Some(ctx_arc))
-            .map_err(|e| WaferError::new("wasm_error", e))?;
+            .map_err(|e| WaferError::new(ErrorCode::INTERNAL, e))?;
 
-        let lifecycle_fn = match instance.get_typed_func::<(i32, i32), i64>(&mut store, "lifecycle") {
-            Ok(f) => f,
-            Err(_) => return Ok(()), // lifecycle is optional
-        };
+        let wit_event = lifecycle_event_to_wit(&event);
 
-        let we = lifecycle_event_to_wasm(&event);
-        let evt_data = serde_json::to_vec(&we)
-            .map_err(|e| WaferError::new("wasm_error", format!("marshaling lifecycle event: {}", e)))?;
-
-        let (evt_ptr, evt_len) = write_to_memory(&mut store, &instance, &evt_data)
-            .map_err(|e| WaferError::new("wasm_error", e))?;
-
-        let (result_ptr, result_len) = {
-            let packed = lifecycle_fn
-                .call(&mut store, (evt_ptr as i32, evt_len as i32))
-                .map_err(|e| WaferError::new("wasm_error", format!("calling lifecycle: {}", e)))?;
-            unpack_i64(packed)
-        };
-
-        if result_len > 0 {
-            let data = read_from_memory(&mut store, &instance, result_ptr as u32, result_len as u32)
-                .map_err(|e| WaferError::new("wasm_error", e))?;
-
-            #[derive(serde::Deserialize)]
-            struct LcResult {
-                #[serde(default)]
-                ok: bool,
-                #[serde(default)]
-                error: String,
-            }
-
-            if let Ok(lc) = serde_json::from_slice::<LcResult>(&data) {
-                if !lc.error.is_empty() {
-                    return Err(WaferError::new("lifecycle_error", lc.error));
-                }
-            }
+        match block_instance.wafer_block_world_block().call_lifecycle(&mut store, &wit_event) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(wit_err)) => Err(WaferError::new(error_code_from_wit(wit_err.code), wit_err.message)),
+            Err(e) => Err(WaferError::new(ErrorCode::INTERNAL, format!("calling lifecycle: {}", e))),
         }
-
-        Ok(())
     }
 }
 
-// Helper: wrap a &dyn Context as an Arc<dyn Context> by using unsafe pointer tricks.
-// This is safe because the WASMBlock::handle call is synchronous and the context
-// outlives the WASM call.
+// ---------------------------------------------------------------------------
+// Conversion helpers between WIT types and internal types
+// ---------------------------------------------------------------------------
+
+use super::bindings;
+
+fn message_to_wit(msg: &Message) -> bindings::types::Message {
+    bindings::types::Message {
+        kind: msg.kind.clone(),
+        data: msg.data.clone(),
+        meta: msg.meta.iter()
+            .map(|(k, v)| bindings::types::MetaEntry { key: k.clone(), value: v.clone() })
+            .collect(),
+    }
+}
+
+fn message_from_wit(wm: bindings::types::Message) -> Message {
+    let mut meta = std::collections::HashMap::new();
+    for entry in wm.meta {
+        meta.insert(entry.key, entry.value);
+    }
+    Message {
+        kind: wm.kind,
+        data: wm.data,
+        meta,
+    }
+}
+
+fn result_from_wit(wr: bindings::types::BlockResult) -> Result_ {
+    let action = match wr.action {
+        bindings::types::Action::Continue => Action::Continue,
+        bindings::types::Action::Respond => Action::Respond,
+        bindings::types::Action::Drop => Action::Drop,
+        bindings::types::Action::Error => Action::Error,
+    };
+
+    let response = wr.response.map(|r| {
+        let mut meta = std::collections::HashMap::new();
+        for entry in r.meta {
+            meta.insert(entry.key, entry.value);
+        }
+        Response { data: r.data, meta }
+    });
+
+    let error = wr.error.map(|e| {
+        let mut meta = std::collections::HashMap::new();
+        for entry in e.meta {
+            meta.insert(entry.key, entry.value);
+        }
+        WaferError {
+            code: error_code_from_wit(e.code).to_string(),
+            message: e.message,
+            meta,
+        }
+    });
+
+    Result_ {
+        action,
+        response,
+        error,
+        message: wr.message.map(message_from_wit),
+    }
+}
+
+fn block_info_from_wit(wbi: bindings::types::BlockInfo) -> BlockInfo {
+    let instance_mode = match wbi.instance_mode {
+        bindings::types::InstanceMode::PerNode => InstanceMode::PerNode,
+        bindings::types::InstanceMode::Singleton => InstanceMode::Singleton,
+        bindings::types::InstanceMode::PerChain => InstanceMode::PerChain,
+        bindings::types::InstanceMode::PerExecution => InstanceMode::PerExecution,
+    };
+
+    let allowed_modes: Vec<InstanceMode> = wbi.allowed_modes.into_iter()
+        .map(|m| match m {
+            bindings::types::InstanceMode::PerNode => InstanceMode::PerNode,
+            bindings::types::InstanceMode::Singleton => InstanceMode::Singleton,
+            bindings::types::InstanceMode::PerChain => InstanceMode::PerChain,
+            bindings::types::InstanceMode::PerExecution => InstanceMode::PerExecution,
+        })
+        .collect();
+
+    BlockInfo {
+        name: wbi.name,
+        version: wbi.version,
+        interface: wbi.interface,
+        summary: wbi.summary,
+        instance_mode,
+        allowed_modes,
+        admin_ui: None,
+    }
+}
+
+/// Convert a WIT error-code enum to a string constant.
+fn error_code_from_wit(code: bindings::types::ErrorCode) -> &'static str {
+    match code {
+        bindings::types::ErrorCode::Ok => ErrorCode::OK,
+        bindings::types::ErrorCode::Cancelled => ErrorCode::CANCELLED,
+        bindings::types::ErrorCode::Unknown => ErrorCode::UNKNOWN,
+        bindings::types::ErrorCode::InvalidArgument => ErrorCode::INVALID_ARGUMENT,
+        bindings::types::ErrorCode::DeadlineExceeded => ErrorCode::DEADLINE_EXCEEDED,
+        bindings::types::ErrorCode::NotFound => ErrorCode::NOT_FOUND,
+        bindings::types::ErrorCode::AlreadyExists => ErrorCode::ALREADY_EXISTS,
+        bindings::types::ErrorCode::PermissionDenied => ErrorCode::PERMISSION_DENIED,
+        bindings::types::ErrorCode::ResourceExhausted => ErrorCode::RESOURCE_EXHAUSTED,
+        bindings::types::ErrorCode::FailedPrecondition => ErrorCode::FAILED_PRECONDITION,
+        bindings::types::ErrorCode::Aborted => ErrorCode::ABORTED,
+        bindings::types::ErrorCode::OutOfRange => ErrorCode::OUT_OF_RANGE,
+        bindings::types::ErrorCode::Unimplemented => ErrorCode::UNIMPLEMENTED,
+        bindings::types::ErrorCode::Internal => ErrorCode::INTERNAL,
+        bindings::types::ErrorCode::Unavailable => ErrorCode::UNAVAILABLE,
+        bindings::types::ErrorCode::DataLoss => ErrorCode::DATA_LOSS,
+        bindings::types::ErrorCode::Unauthenticated => ErrorCode::UNAUTHENTICATED,
+    }
+}
+
+fn lifecycle_event_to_wit(event: &LifecycleEvent) -> bindings::types::LifecycleEvent {
+    let event_type = match event.event_type {
+        LifecycleType::Init => bindings::types::LifecycleType::Init,
+        LifecycleType::Start => bindings::types::LifecycleType::Start,
+        LifecycleType::Stop => bindings::types::LifecycleType::Stop,
+    };
+    bindings::types::LifecycleEvent {
+        event_type,
+        data: event.data.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ContextWrapper: wrap a &dyn Context as an Arc<dyn Context>
+// ---------------------------------------------------------------------------
+
 struct ContextWrapper(*const dyn Context);
 unsafe impl Send for ContextWrapper {}
 unsafe impl Sync for ContextWrapper {}

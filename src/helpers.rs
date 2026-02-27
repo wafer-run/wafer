@@ -1,3 +1,4 @@
+use crate::common::ErrorCode;
 use crate::context::Context;
 use crate::meta::*;
 use crate::types::*;
@@ -64,43 +65,43 @@ pub fn error(msg: Message, status: u16, err_code: &str, err_message: &str) -> Re
 pub fn json_respond<T: serde::Serialize>(msg: Message, status: u16, data: &T) -> Result_ {
     match serde_json::to_vec(data) {
         Ok(body) => respond(msg, status, body, "application/json"),
-        Err(e) => error(msg, 500, "marshal_error", &e.to_string()),
+        Err(e) => error(msg, 500, ErrorCode::INTERNAL, &e.to_string()),
     }
 }
 
 /// ErrBadRequest returns a 400 error.
 pub fn err_bad_request(msg: Message, message: &str) -> Result_ {
-    error(msg, 400, "bad_request", message)
+    error(msg, 400, ErrorCode::INVALID_ARGUMENT, message)
 }
 
 /// ErrUnauthorized returns a 401 error.
 pub fn err_unauthorized(msg: Message, message: &str) -> Result_ {
-    error(msg, 401, "unauthorized", message)
+    error(msg, 401, ErrorCode::UNAUTHENTICATED, message)
 }
 
 /// ErrForbidden returns a 403 error.
 pub fn err_forbidden(msg: Message, message: &str) -> Result_ {
-    error(msg, 403, "forbidden", message)
+    error(msg, 403, ErrorCode::PERMISSION_DENIED, message)
 }
 
 /// ErrNotFound returns a 404 error.
 pub fn err_not_found(msg: Message, message: &str) -> Result_ {
-    error(msg, 404, "not_found", message)
+    error(msg, 404, ErrorCode::NOT_FOUND, message)
 }
 
 /// ErrConflict returns a 409 error.
 pub fn err_conflict(msg: Message, message: &str) -> Result_ {
-    error(msg, 409, "conflict", message)
+    error(msg, 409, ErrorCode::ALREADY_EXISTS, message)
 }
 
 /// ErrValidation returns a 422 error.
 pub fn err_validation(msg: Message, message: &str) -> Result_ {
-    error(msg, 422, "validation_error", message)
+    error(msg, 422, ErrorCode::INVALID_ARGUMENT, message)
 }
 
 /// ErrInternal returns a 500 error.
 pub fn err_internal(msg: Message, message: &str) -> Result_ {
-    error(msg, 500, "internal_error", message)
+    error(msg, 500, ErrorCode::INTERNAL, message)
 }
 
 /// ResponseBuilder builds responses with headers and cookies.
@@ -156,7 +157,7 @@ impl ResponseBuilder {
                     meta: self.meta,
                 })
             }
-            Err(e) => error(self.msg, 500, "marshal_error", &e.to_string()),
+            Err(e) => error(self.msg, 500, ErrorCode::INTERNAL, &e.to_string()),
         }
     }
 

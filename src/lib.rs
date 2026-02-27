@@ -6,6 +6,7 @@
 
 pub mod block;
 pub mod bridge;
+pub mod common;
 pub mod config;
 pub mod context;
 pub mod executor;
@@ -18,6 +19,7 @@ pub mod registry;
 pub mod router;
 pub mod runtime;
 pub mod schema;
+pub mod security;
 pub mod services;
 pub mod types;
 pub mod waferconfig;
